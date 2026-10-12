@@ -73,8 +73,12 @@ in order.
 
 ## Status
 
-- Core: implemented and tested (23 tests; the real-file import test is opt-in).
-- iPad app: written against UIKit/SwiftUI/CoreGraphics. CI compiles it for the iOS simulator on
-  macOS (`.github/workflows/ci.yml`). It has not yet run on a device.
-- Next steps: PencilKit-grade latency (Metal renderer), lasso select/move, PDF import and export,
-  on-device handwriting recognition (Vision) for new ink, thumbnail grid.
+- Core: implemented and tested (`swift test`; the real-file import test is opt-in).
+- iPad app: runs on device (sideloaded build). CI compiles it for the simulator and builds the IPA.
+- Drawing: pressure pens render as filled variable-width outlines. Committed ink is cached and only
+  changed areas repaint; the live stroke is drawn on a separate overlay with predicted touches.
+- Lasso (vector and agent layers): select, drag to move, duplicate, delete.
+- PDF: import (one page per PDF page, as background) and export (vector PDF via the share sheet).
+- Handwriting recognition: on-device (Vision), a few seconds after you stop writing on a page; the
+  transcript feeds the agent's `read_page`.
+- Next steps: Metal brush engine for textured/large raster brushes, raster lasso, thumbnails/search.

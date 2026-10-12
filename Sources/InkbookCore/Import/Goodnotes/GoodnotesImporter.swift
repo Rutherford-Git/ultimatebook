@@ -1,12 +1,15 @@
 import Foundation
 import ZIPFoundation
 
-/// What the importer converted, approximated, or could not convert. Nothing is dropped silently.
+/// What the importer converted or could not convert. Nothing is dropped silently.
 public struct ImportReport: Equatable, Sendable {
     public var pages = 0
     public var strokes = 0
-    /// Variable-width (fountain pen / pencil) strokes imported as a constant-width centerline.
-    public var approximatedStrokes = 0
+    /// Variable-width (fountain pen) strokes, imported as their exact filled outline.
+    public var outlinedStrokes = 0
+    /// Shape-tool lines (dashed connectors), imported as strokes.
+    public var lines = 0
+    public var stickyNotes = 0
     /// Stroke records that carry no geometry (seen with header kind 4); nothing to draw.
     public var emptyStrokes = 0
     /// Text boxes with styling but no text.
@@ -165,7 +168,7 @@ public enum GoodnotesImporter {
     // MARK: Elements
 
     /// `notes/<id>` is a stream of (header, body) messages; the body's single field number
-    /// is the element kind: 7 stroke, 1 image, 21 text box, 20/22 not yet understood.
+    /// is the element kind: 7 stroke, 1 image, 21 text box, 20 sticky note, 22 line shape.
     static func convertElements(_ data: Data, source: GoodnotesSource,
                                 assets: inout [String: Data], report: inout ImportReport) -> [Element] {
         var elements: [Element] = []
@@ -178,7 +181,7 @@ public enum GoodnotesImporter {
             case 7:
                 switch stroke(body) {
                 case .exact(let paths): elements += paths.map(Element.stroke); report.strokes += 1
-                case .approximated(let s): elements.append(.stroke(s)); report.strokes += 1; report.approximatedStrokes += 1
+                case .outline(let shape): elements.append(.shape(shape)); report.strokes += 1; report.outlinedStrokes += 1
                 case .empty: report.emptyStrokes += 1
                 case .failed: report.unsupported["undecodable stroke", default: 0] += 1
                 }
@@ -194,6 +197,12 @@ public enum GoodnotesImporter {
                 case .some(let t): elements.append(.text(t)); report.textBoxes += 1
                 case .none: report.unsupported["text box", default: 0] += 1
                 }
+            case 20:
+                if let note = stickyNote(body) { elements.append(.text(note)); report.stickyNotes += 1 }
+                else { report.unsupported["sticky note", default: 0] += 1 }
+            case 22:
+                if let line = shapeLine(body) { elements.append(.stroke(line)); report.lines += 1 }
+                else { report.unsupported["line shape", default: 0] += 1 }
             default:
                 report.unsupported["kind \(field.number)", default: 0] += 1
             }
@@ -207,7 +216,7 @@ public enum GoodnotesImporter {
         return false
     }
 
-    enum StrokeResult { case exact([Stroke]), approximated(Stroke), empty, failed }
+    enum StrokeResult { case exact([Stroke]), outline(FilledShape), empty, failed }
 
     static func stroke(_ body: ProtoMessage) -> StrokeResult {
         guard let blob = body.bytes(2), let raw = try? AppleLZ4.decode(blob),
@@ -240,14 +249,93 @@ public enum GoodnotesImporter {
             return .exact(paths.map { Stroke(brush: brush, points: $0.map { InkPoint($0 + offset) }) })
         }
 
-        // Variable-width pens: the dense centerline as (x, y) pairs (third-to-last value).
-        // Width varies per point in the original; we import a constant width (reported).
-        let centerline = v[v.count - 3].items.compactMap(\.asFloat)
-        guard centerline.count >= 4, centerline.count % 2 == 0 else { return .failed }
-        let points = stride(from: 0, to: centerline.count, by: 2).map {
-            InkPoint(Point(centerline[$0], centerline[$0 + 1]) + offset)
+        // Variable-width pens store the filled outline: codes at base+4, moveTo points at
+        // base+5, cubic control/end points at base+7 (see docs/GOODNOTES_FORMAT.md).
+        guard let path = outlinePath(codes: v[base + 4].items.compactMap(\.asInt),
+                                     starts: v[base + 5].items.compactMap(\.asFloat),
+                                     cubics: v[base + 7].items.compactMap(\.asFloat)) else { return .failed }
+        return .outline(FilledShape(path: path.map { $0.translated(by: offset) }, color: color))
+    }
+
+    /// Outline code tables observed in Goodnotes files. A table applies only when its moveTo and
+    /// cubic counts account for every coordinate exactly; otherwise the stroke is reported.
+    static let outlineCodeTables: [(move: Int, cubic: Int, close: Int?)] = [(2, 4, nil), (0, 2, 6)]
+
+    static func outlinePath(codes: [Int], starts: [Double], cubics: [Double]) -> [PathCommand]? {
+        guard !codes.isEmpty, starts.count % 2 == 0, cubics.count % 6 == 0 else { return nil }
+        for table in outlineCodeTables {
+            let known = Set([table.move, table.cubic] + (table.close.map { [$0] } ?? []))
+            guard codes.allSatisfy(known.contains),
+                  codes.filter({ $0 == table.move }).count * 2 == starts.count,
+                  codes.filter({ $0 == table.cubic }).count * 6 == cubics.count,
+                  codes.first == table.move else { continue }
+            var path: [PathCommand] = []
+            var si = 0, ci = 0
+            for code in codes {
+                if code == table.move {
+                    if !path.isEmpty { path.append(.close) }
+                    path.append(.move(Point(starts[si], starts[si + 1]))); si += 2
+                } else if code == table.cubic {
+                    let c = cubics[ci..<(ci + 6)].map { $0 }; ci += 6
+                    path.append(.cubic(control1: Point(c[0], c[1]), control2: Point(c[2], c[3]), to: Point(c[4], c[5])))
+                } else {
+                    path.append(.close)
+                }
+            }
+            if path.last != .close { path.append(.close) }
+            return path
         }
-        return .approximated(Stroke(brush: Brush(kind: kind, color: color, size: 1.6, minSizeRatio: 1), points: points))
+        return nil
+    }
+
+    /// Kind 22: shape-tool line. Points are field 20 {1: start, 2: via (repeated), 3: end}, or
+    /// field 21 {1: start, 3: end, 5.2: midpoint}; style is field 32 {1: width, 2.2: dash, 3.1: color}.
+    static func shapeLine(_ body: ProtoMessage) -> Stroke? {
+        func point(_ m: ProtoMessage?) -> Point? {
+            guard let m, let x = m.float(1), let y = m.float(2) else { return nil }
+            return Point(x, y)
+        }
+        var points: [Point] = []
+        if let g = body.message(20), let start = point(g.message(1)?.message(1)), let end = point(g.message(3)?.message(1)) {
+            let via = g.all(2).compactMap { value -> Point? in
+                if case .bytes(let d) = value { return point(ProtoMessage(d)) }
+                return nil
+            }
+            points = [start] + via + [end]
+        } else if let g = body.message(21), let start = point(g.message(1)?.message(1)), let end = point(g.message(3)?.message(1)) {
+            // A midpoint off the chord makes a curve; flatten it as a quadratic through that point.
+            if let mid = point(g.message(5)?.message(2)) {
+                let control = mid * 2 - (start + end) * 0.5
+                points = [start] + flattenQuadratic(from: start, control: control, to: end)
+            } else {
+                points = [start, end]
+            }
+        }
+        guard points.count >= 2 else { return nil }
+        let style = body.message(32)
+        let width = style?.float(1) ?? 1
+        let dash = style?.message(2)?.message(2).flatMap { d -> [Double]? in
+            guard let on = d.float(1), let off = d.float(2), on > 0, off > 0 else { return nil }
+            return [on, off]
+        }
+        let brush = Brush(kind: .pen, color: rgba(style?.message(3)?.message(1)), size: max(0.3, width),
+                          minSizeRatio: 1, dash: dash)
+        return Stroke(brush: brush, points: points.map { InkPoint($0) })
+    }
+
+    /// Kind 20: sticky note. Field 20.1 origin, 21.2 size, 30 background RGBA, 31 text content
+    /// (same run format as text boxes), 33 author name (not imported).
+    static func stickyNote(_ body: ProtoMessage) -> TextBox? {
+        guard let origin = body.message(20)?.message(1) else { return nil }
+        let size = body.message(21)?.message(2)
+        let content = body.message(31)
+        let run = content?.message(1)?.bytes(2).flatMap { try? AppleLZ4.decode($0) }.flatMap(ProtoMessage.init)?.message(1)
+        let style = content?.message(5)?.message(1)
+        let background = body.message(30).map { rgba($0) } ?? RGBA(1, 0.95, 0.6)
+        return TextBox(frame: Rect(x: origin.float(1) ?? 0, y: origin.float(2) ?? 0,
+                                   width: size?.float(1) ?? 256, height: size?.float(2) ?? 256),
+                       text: run?.string(1) ?? "", fontSize: style?.float(40) ?? 18,
+                       color: rgba(style?.message(3)), background: background)
     }
 
     /// Rebuilds subpaths from moveTo (0) / quadTo (1) commands and flat float arrays.
@@ -318,23 +406,11 @@ public enum GoodnotesImporter {
     /// (1 = bbox, 3 = ranked candidates). Words are grouped into lines by vertical center.
     static func recognizedText(_ data: Data) -> String {
         guard let msg = ProtoMessage(data) else { return "" }
-        struct Word { var x, y, h: Double; var text: String }
-        var words: [Word] = []
-        for case .bytes(let raw) in msg.all(6) {
-            guard let w = ProtoMessage(raw), let best = w.string(3), let box = rect(w.message(1)) else { continue }
-            words.append(Word(x: box.minX, y: box.minY, h: box.size.height, text: best))
+        let words = msg.all(6).compactMap { value -> TextLayout.Word? in
+            guard case .bytes(let raw) = value, let w = ProtoMessage(raw), let best = w.string(3),
+                  let box = rect(w.message(1)) else { return nil }
+            return TextLayout.Word(frame: box, text: best)
         }
-        words.sort { ($0.y + $0.h / 2) < ($1.y + $1.h / 2) }
-        var lines: [(center: Double, words: [Word])] = []
-        for w in words {
-            let center = w.y + w.h / 2
-            if let last = lines.last, abs(last.center - center) < max(w.h, 12) * 0.6 {
-                lines[lines.count - 1].words.append(w)
-            } else {
-                lines.append((center, [w]))
-            }
-        }
-        return lines.map { $0.words.sorted { $0.x < $1.x }.map(\.text).joined(separator: " ") }
-            .joined(separator: "\n")
+        return TextLayout.transcript(words)
     }
 }

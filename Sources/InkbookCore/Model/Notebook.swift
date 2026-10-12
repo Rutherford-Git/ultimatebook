@@ -33,11 +33,13 @@ public struct Brush: Codable, Hashable, Sendable {
     public var spacing: Double
     /// 0 = hard edge, 1 = fully soft (raster brushes).
     public var softness: Double
+    /// Dash pattern as on/off lengths in multiples of `size`; nil = solid.
+    public var dash: [Double]?
 
     public init(kind: BrushKind, color: RGBA, size: Double,
-                minSizeRatio: Double = 0.35, spacing: Double = 0.15, softness: Double = 0) {
+                minSizeRatio: Double = 0.35, spacing: Double = 0.15, softness: Double = 0, dash: [Double]? = nil) {
         self.kind = kind; self.color = color; self.size = size
-        self.minSizeRatio = minSizeRatio; self.spacing = spacing; self.softness = softness
+        self.minSizeRatio = minSizeRatio; self.spacing = spacing; self.softness = softness; self.dash = dash
     }
 
     public var isRaster: Bool { [.pencil, .airbrush, .marker].contains(kind) }
@@ -54,6 +56,12 @@ public struct Stroke: Codable, Hashable, Sendable, Identifiable {
 
     public init(id: UUID = UUID(), brush: Brush, points: [InkPoint]) {
         self.id = id; self.brush = brush; self.points = points
+    }
+
+    /// Pressure-sensitive solid pens render as a filled variable-width outline; constant-width,
+    /// dashed and highlighter strokes render as a stroked centerline.
+    public var usesOutline: Bool {
+        brush.kind == .pen && brush.minSizeRatio < 1 && brush.dash == nil
     }
 
     public var bounds: Rect? {
@@ -90,6 +98,48 @@ public struct PlacedImage: Codable, Hashable, Sendable, Identifiable {
     }
 }
 
+/// One drawing command of a filled outline.
+public enum PathCommand: Codable, Hashable, Sendable {
+    case move(Point)
+    case line(Point)
+    case quad(control: Point, to: Point)
+    case cubic(control1: Point, control2: Point, to: Point)
+    case close
+
+    /// Every coordinate the command references (for bounds and hit-testing).
+    public var points: [Point] {
+        switch self {
+        case .move(let p), .line(let p): [p]
+        case .quad(let c, let p): [c, p]
+        case .cubic(let c1, let c2, let p): [c1, c2, p]
+        case .close: []
+        }
+    }
+
+    public func translated(by d: Point) -> PathCommand {
+        switch self {
+        case .move(let p): .move(p + d)
+        case .line(let p): .line(p + d)
+        case .quad(let c, let p): .quad(control: c + d, to: p + d)
+        case .cubic(let c1, let c2, let p): .cubic(control1: c1 + d, control2: c2 + d, to: p + d)
+        case .close: .close
+        }
+    }
+}
+
+/// Filled outline with nonzero winding: imported fountain-pen ink and other exact shapes.
+public struct FilledShape: Codable, Hashable, Sendable, Identifiable {
+    public var id: UUID
+    public var path: [PathCommand]
+    public var color: RGBA
+
+    public init(id: UUID = UUID(), path: [PathCommand], color: RGBA) {
+        self.id = id; self.path = path; self.color = color
+    }
+
+    public var bounds: Rect? { Rect.bounding(path.flatMap(\.points)) }
+}
+
 /// Filled translucent rectangle, e.g. an agent highlight over a region.
 public struct HighlightRegion: Codable, Hashable, Sendable, Identifiable {
     public var id: UUID
@@ -105,6 +155,7 @@ public enum Element: Codable, Hashable, Sendable, Identifiable {
     case text(TextBox)
     case image(PlacedImage)
     case highlight(HighlightRegion)
+    case shape(FilledShape)
 
     public var id: UUID {
         switch self {
@@ -112,6 +163,54 @@ public enum Element: Codable, Hashable, Sendable, Identifiable {
         case .text(let t): t.id
         case .image(let i): i.id
         case .highlight(let h): h.id
+        case .shape(let s): s.id
+        }
+    }
+
+    /// Axis-aligned bounds in page points (nil for empty geometry).
+    public var bounds: Rect? {
+        switch self {
+        case .stroke(let s): s.bounds
+        case .text(let t): t.frame
+        case .image(let i): i.frame
+        case .highlight(let h): h.frame
+        case .shape(let s): s.bounds
+        }
+    }
+
+    /// Representative points used by lasso selection: geometry for ink, corners + center for boxes.
+    public var samplePoints: [Point] {
+        switch self {
+        case .stroke(let s): return s.points.map(\.location)
+        case .shape(let s): return s.path.flatMap(\.points)
+        case .text, .image, .highlight:
+            guard let r = bounds else { return [] }
+            return [r.origin, Point(r.maxX, r.minY), Point(r.minX, r.maxY), Point(r.maxX, r.maxY),
+                    Point((r.minX + r.maxX) / 2, (r.minY + r.maxY) / 2)]
+        }
+    }
+
+    public func translated(by d: Point) -> Element {
+        func move(_ r: Rect) -> Rect { Rect(x: r.minX + d.x, y: r.minY + d.y, width: r.size.width, height: r.size.height) }
+        switch self {
+        case .stroke(var s):
+            for i in s.points.indices { s.points[i].location = s.points[i].location + d }
+            return .stroke(s)
+        case .text(var t): t.frame = move(t.frame); return .text(t)
+        case .image(var i): i.frame = move(i.frame); return .image(i)
+        case .highlight(var h): h.frame = move(h.frame); return .highlight(h)
+        case .shape(var s): s.path = s.path.map { $0.translated(by: d) }; return .shape(s)
+        }
+    }
+
+    /// Copy with fresh identity (duplicate / paste).
+    public func withNewID() -> Element {
+        switch self {
+        case .stroke(var s): s.id = UUID(); return .stroke(s)
+        case .text(var t): t.id = UUID(); return .text(t)
+        case .image(var i): i.id = UUID(); return .image(i)
+        case .highlight(var h): h.id = UUID(); return .highlight(h)
+        case .shape(var s): s.id = UUID(); return .shape(s)
         }
     }
 }

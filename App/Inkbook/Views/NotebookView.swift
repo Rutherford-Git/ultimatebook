@@ -7,6 +7,8 @@ struct NotebookView: View {
     @State private var showLayers = false
     @State private var showAgent = false
     @StateObject private var chat = AgentChatModel()
+    @State private var exported: ExportedFile?
+    @State private var exportError: String?
     @AppStorage("agent.enabled") private var agentEnabled = false
 
     var body: some View {
@@ -15,7 +17,12 @@ struct NotebookView: View {
             Divider()
             CanvasView(document: document)
                 .ignoresSafeArea(edges: .bottom)
+                .overlay(alignment: .bottom) { if !document.selection.isEmpty { selectionBar } }
         }
+        .sheet(item: $exported) { ShareSheet(items: [$0.url]) }
+        .alert("Export failed", isPresented: Binding(get: { exportError != nil }, set: { if !$0 { exportError = nil } })) {
+            Button("OK") {}
+        } message: { Text(exportError ?? "") }
         .sheet(isPresented: $showLayers) { LayersPanel(document: document).presentationDetents([.medium, .large]) }
         .sheet(isPresented: $showAgent) {
             AgentPanel(document: document, chat: chat).presentationDetents([.medium, .large])
@@ -45,6 +52,11 @@ struct NotebookView: View {
             Toggle(isOn: $document.pencilOnly) { Image(systemName: "applepencil") }.toggleStyle(.button)
             Button { showLayers = true } label: { Image(systemName: "square.3.layers.3d") }
             pageControls
+            Button {
+                document.saveNow()
+                do { exported = ExportedFile(url: try document.exportPDF()) } catch { exportError = error.localizedDescription }
+            } label: { Image(systemName: "square.and.arrow.up") }
+            .accessibilityLabel("Export PDF")
             if agentEnabled {
                 Button { showAgent = true } label: { Image(systemName: "sparkles") }
                     .accessibilityLabel("Agent")
@@ -53,6 +65,19 @@ struct NotebookView: View {
         .padding(.horizontal)
         .padding(.vertical, 8)
         .background(.bar)
+    }
+
+    private var selectionBar: some View {
+        HStack(spacing: 20) {
+            Text("\(document.selection.count) selected").font(.callout).foregroundStyle(.secondary)
+            Button { document.duplicateSelection() } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
+            Button(role: .destructive) { document.deleteSelection() } label: { Label("Delete", systemImage: "trash") }
+            Button { document.clearSelection() } label: { Text("Done").bold() }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .background(.regularMaterial, in: Capsule())
+        .padding(.bottom, 24)
     }
 
     private var pageControls: some View {
@@ -119,4 +144,18 @@ struct ApprovalSheet: View {
         }
         .padding(24)
     }
+}
+
+struct ExportedFile: Identifiable {
+    let url: URL
+    var id: URL { url }
+}
+
+/// System share sheet (Save to Files, AirDrop, Mail, …) for exported files.
+struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }

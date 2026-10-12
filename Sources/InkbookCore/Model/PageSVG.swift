@@ -58,13 +58,19 @@ public enum PageSVG {
 
     static func svg(_ element: Element, resolveData: (String) -> (Data, mime: String)?) -> String {
         switch element {
+        case .stroke(let s) where s.usesOutline:
+            return "<path d=\"\(pathData(StrokeOutline.outline(for: s)))\" fill=\"\(css(s.brush.color))\" fill-opacity=\"\(fmt(s.brush.color.a))\"/>"
+        case .shape(let shape):
+            return "<path d=\"\(pathData(shape.path))\" fill=\"\(css(shape.color))\" fill-opacity=\"\(fmt(shape.color.a))\" fill-rule=\"nonzero\"/>"
         case .stroke(let s):
             guard let path = BrushEngine.quadraticPath(s.points.map(\.location)) else { return "" }
             var d = "M\(fmt(path.start.x)),\(fmt(path.start.y))"
             if path.segments.isEmpty { d += " l0.01,0" }   // dot
             for (c, e) in path.segments { d += " Q\(fmt(c.x)),\(fmt(c.y)) \(fmt(e.x)),\(fmt(e.y))" }
             return "<path d=\"\(d)\" fill=\"none\" stroke=\"\(css(s.brush.color))\" stroke-opacity=\"\(fmt(s.brush.color.a))\" "
-                + "stroke-width=\"\(fmt(s.brush.size))\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>"
+                + "stroke-width=\"\(fmt(s.brush.size))\" stroke-linecap=\"round\" stroke-linejoin=\"round\""
+                + (s.brush.dash.map { " stroke-dasharray=\"\($0.map { fmt($0 * s.brush.size) }.joined(separator: " "))\"" } ?? "")
+                + "/>"
         case .text(let t):
             var s = ""
             if let bg = t.background {
@@ -84,6 +90,18 @@ public enum PageSVG {
             return "<rect x=\"\(fmt(h.frame.minX))\" y=\"\(fmt(h.frame.minY))\" width=\"\(fmt(h.frame.size.width))\" "
                 + "height=\"\(fmt(h.frame.size.height))\" fill=\"\(css(h.color))\" fill-opacity=\"\(fmt(h.color.a))\"/>"
         }
+    }
+
+    static func pathData(_ path: [PathCommand]) -> String {
+        path.map { c -> String in
+            switch c {
+            case .move(let p): "M\(fmt(p.x)),\(fmt(p.y))"
+            case .line(let p): "L\(fmt(p.x)),\(fmt(p.y))"
+            case .quad(let c, let p): "Q\(fmt(c.x)),\(fmt(c.y)) \(fmt(p.x)),\(fmt(p.y))"
+            case .cubic(let c1, let c2, let p): "C\(fmt(c1.x)),\(fmt(c1.y)) \(fmt(c2.x)),\(fmt(c2.y)) \(fmt(p.x)),\(fmt(p.y))"
+            case .close: "Z"
+            }
+        }.joined(separator: " ")
     }
 
     static func image(_ frame: Rect, _ data: Data, _ mime: String) -> String {

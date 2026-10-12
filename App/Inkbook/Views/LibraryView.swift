@@ -36,7 +36,7 @@ struct LibraryView: View {
             }
             .navigationTitle("Inkbook")
             .toolbar {
-                Button { importing = true } label: { Label("Import Goodnotes", systemImage: "square.and.arrow.down") }
+                Button { importing = true } label: { Label("Import Goodnotes or PDF", systemImage: "square.and.arrow.down") }
                 Button { askingTitle = true } label: { Label("New Notebook", systemImage: "plus") }
                 Button { showAgentSettings = true } label: { Label("Agent", systemImage: "sparkles") }
             }
@@ -46,8 +46,8 @@ struct LibraryView: View {
                 Button("Create") { open = library.create(title: newTitle.isEmpty ? "Untitled" : newTitle).map(OpenNotebook.init); newTitle = "" }
                 Button("Cancel", role: .cancel) {}
             }
-            .fileImporter(isPresented: $importing, allowedContentTypes: [LibraryStore.goodnotesType, .zip]) { result in
-                if case .success(let url) = result { Task { await library.importGoodnotes(from: url) } }
+            .fileImporter(isPresented: $importing, allowedContentTypes: [LibraryStore.goodnotesType, .pdf, .zip]) { result in
+                if case .success(let url) = result { Task { await library.importFile(from: url) } }
             }
             .alert("Imported", isPresented: Binding(get: { library.lastImportReport != nil },
                                                     set: { if !$0 { library.lastImportReport = nil } })) {
@@ -67,7 +67,9 @@ struct LibraryView: View {
 
     static func describe(_ r: ImportReport) -> String {
         var s = "\(r.pages) pages, \(r.strokes) strokes, \(r.images) images, \(r.textBoxes) text boxes."
-        if r.approximatedStrokes > 0 { s += "\n\(r.approximatedStrokes) fountain-pen strokes imported at constant width." }
+        if r.outlinedStrokes + r.lines + r.stickyNotes > 0 {
+            s += "\nIncludes \(r.outlinedStrokes) fountain-pen strokes, \(r.lines) lines and \(r.stickyNotes) sticky notes."
+        }
         if !r.unsupported.isEmpty {
             s += "\nNot imported: " + r.unsupported.map { "\($0.value)× \($0.key)" }.sorted().joined(separator: ", ")
         }

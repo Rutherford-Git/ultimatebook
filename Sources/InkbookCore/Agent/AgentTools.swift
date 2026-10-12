@@ -155,7 +155,7 @@ public enum NotebookTools {
             if layer.kind == .agent { r.agent += layer.elements.count; continue }
             for e in layer.elements {
                 switch e {
-                case .stroke: r.strokes += 1
+                case .stroke, .shape: r.strokes += 1
                 case .text: r.texts += 1
                 case .image: r.images += 1
                 case .highlight: break
@@ -186,7 +186,7 @@ public enum NotebookTools {
                 case .text(let t): out.append("  text box at \(box(t.frame)): \(t.text)")
                 case .image(let img): out.append("  image at \(box(img.frame))")
                 case .highlight(let h): out.append("  highlight at \(box(h.frame))")
-                case .stroke(let s): if let b = s.bounds { strokeBounds.append(b) }
+                case .stroke, .shape: if let b = e.bounds { strokeBounds.append(b) }
                 }
             }
             if let ink = Rect.bounding(strokeBounds.flatMap { [$0.origin, Point($0.maxX, $0.maxY)] }) {

@@ -50,7 +50,8 @@ then **body** `{<KIND>: {...}}`.
 | 7 | 6030 | **Stroke** [verified] |
 | 1 | 42 | **Image** [verified] |
 | 21 | 4 | **Text box** [verified] |
-| 20, 22 | 11 | Other text/shape objects [unknown] |
+| 20 | 1 | **Sticky note** [verified] |
+| 22 | 10 | **Line shape** (dashed connector) [verified by render] |
 
 ### Stroke body (kind 7)
 | Field | Meaning |
@@ -81,8 +82,12 @@ Second signature `[v|vu]A(v)A(u)A(u)A(v)A(v)A(u)A(u)A(u)A(u)A(v)` (270) has thre
 - **All arrays empty** (255; header kind 4): no geometry in the record — nothing to draw [verified].
 - **Flat path** (commands only 0/1): value `base` = commands, `base+1` = flat `(x, y)` moveTo list,
   `base+2` = flat `(cx, cy, x, y)` quadratic segments — same path model as above, multiple subpaths [verified].
-- **Variable width** (commands 2/3): third-to-last array = dense `(x, y)` centerline; per-point widths
-  live in other arrays — imported as constant width, outline not reconstructed [partly unknown].
+- **Variable width** (fountain pen; commands 2/3 or 4/5): the record stores the **filled outline**.
+  `base+4` = outline codes, `base+5` = flat `(x, y)` moveTo points, `base+7` = flat cubic Bézier
+  coordinates `(c1x, c1y, c2x, c2y, x, y)`. Two code tables are observed [verified, 14/14 strokes]:
+  A: `2` = moveTo, `4` = cubic; B: `0` = moveTo, `2` = cubic, `6` = close. A table applies only when
+  `count(move) × 2 = len(starts)` and `count(cubic) × 6 = len(cubics)`. Fill rule: nonzero.
+  `base+1..3` (keypoints with width, centerline) are not needed for rendering.
 
 ### Image body (kind 1) [verified by render]
 `4` = attachment id (`attachments/<id>`), `3` = frame `{1:{x,y}, 2:{w,h}}`, `2` = second rect (crop/original?) [inferred].
@@ -92,9 +97,15 @@ Second signature `[v|vu]A(v)A(u)A(u)A(v)A(v)A(u)A(u)A(u)A(u)A(v)` (270) has thre
 `32.1.2` = `bv41` blob → protobuf `{1: {1: text, 2: run style (font name at 30), 3: paragraph style}}`.
 A run without field 1 is an **empty text box** (3 of 4 in the sample).
 
-### Kind 22 [unknown]
-`20 = {1: {start point}, 2: control point (repeated), 3: {end point}}`, `31: 2` — looks like a
-connector/curved line. Not imported; counted in the import report.
+### Sticky note (kind 20) [verified]
+`20.1` origin, `21.2` size, `30` background RGBA, `31` content (same `{1: {2: bv41}}` run format as
+text boxes; the sample's note is empty), `32` note id, `33` author name, `40: 1`.
+
+### Line shape (kind 22) [verified by render]
+Geometry is either `20 = {1: {1: start}, 2: via point (repeated), 3: {1: end}}` or
+`21 = {1: {1: start}, 3: {1: end}, 5: {2: midpoint}}` (a midpoint on the chord ⇒ straight line).
+Style `32 = {1: width, 2: {2: {1: dash on, 2: dash off}}, 3: {1: RGBA}}`; `31: 2` unknown.
+Dash lengths are imported as multiples of the width [inferred].
 
 ## 5. `search/<noteId>` — handwriting recognition [verified]
 Message `{5: id, 6: word…}`; each word: `1` bbox `{origin, size}`, `3` ranked candidates (strings),
@@ -102,13 +113,11 @@ Message `{5: id, 6: word…}`; each word: `1` bbox `{origin, size}`, `3` ranked 
 
 ## Implementation
 `Sources/InkbookCore/Import/Goodnotes/` — `ProtoReader` (wire format), `AppleLZ4`, `TPLDecoder`,
-`GoodnotesImporter` (mapping + `ImportReport`). Against the 31-page sample: 6,030/6,030 stroke records
-accounted for (5,775 drawn, 14 approximated, 255 empty), 42 images, 1 text box (+3 empty);
-not imported: kind 22 ×10, kind 20 ×1.
+`GoodnotesImporter` (mapping + `ImportReport`). Against the 31-page sample every element imports:
+6,030/6,030 stroke records (5,761 centerline strokes, 14 exact fountain-pen outlines, 255 empty),
+42 images, 1 text box (+3 empty), 10 line shapes, 1 sticky note; `unsupported` is empty.
 
 ## Known gaps
-1. Variable-width strokes import at constant width (14 in the sample).
-2. Kinds 20 / 22 not imported (reported).
-3. PDF page index for backgrounds (`template.6`) inferred from one sample.
-4. Header `3 = 1` flag (507 strokes) meaning unknown — they render correctly anyway.
-5. One sample only: confirm with a minimal-diff set (blank page / 1 stroke / 1 color / 1 text box).
+1. PDF page index for backgrounds (`template.6`) inferred from one sample.
+2. Kind 22 `31` field and dash units inferred; header `3 = 1` flag (507 strokes) unknown — both render correctly.
+3. One sample only: confirm with a minimal-diff set (blank page / 1 stroke / 1 color / 1 text box).

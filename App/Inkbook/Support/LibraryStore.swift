@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import InkbookCore
 import UniformTypeIdentifiers
@@ -39,6 +40,40 @@ final class LibraryStore: ObservableObject {
         } catch {
             errorMessage = "Could not create notebook: \(error.localizedDescription)"
             return nil
+        }
+    }
+
+    /// Imports a file picked in the Files app: PDF, or a Goodnotes notebook.
+    func importFile(from picked: URL) async {
+        if picked.pathExtension.lowercased() == "pdf" { await importPDF(from: picked) }
+        else { await importGoodnotes(from: picked) }
+    }
+
+    /// Creates a notebook with one page per PDF page (the PDF is the page background).
+    func importPDF(from picked: URL) async {
+        let accessed = picked.startAccessingSecurityScopedResource()
+        defer { if accessed { picked.stopAccessingSecurityScopedResource() } }
+        do {
+            let data = try Data(contentsOf: picked)
+            guard let provider = CGDataProvider(data: data as CFData), let doc = CGPDFDocument(provider) else {
+                errorMessage = "That file is not a readable PDF."; return
+            }
+            if doc.isEncrypted, !doc.unlockWithPassword("") {
+                errorMessage = "The PDF is password-protected."; return
+            }
+            let pages = (0..<doc.numberOfPages).map { i -> PDFImport.PageInfo in
+                guard let page = doc.page(at: i + 1) else { return PDFImport.PageInfo(size: Size(0, 0)) }
+                let box = page.getBoxRect(.cropBox)
+                let rotated = page.rotationAngle % 180 != 0
+                return PDFImport.PageInfo(size: rotated ? Size(box.height, box.width) : Size(box.width, box.height))
+            }
+            let asset = "document.pdf"
+            let notebook = try PDFImport.notebook(title: picked.deletingPathExtension().lastPathComponent, asset: asset, pages: pages)
+            let store = try NotebookStore.create(at: uniqueURL(for: notebook.title), notebook: notebook)
+            try store.saveAsset(data, named: asset)
+            reload()
+        } catch {
+            errorMessage = "PDF import failed: \(error)"
         }
     }
 

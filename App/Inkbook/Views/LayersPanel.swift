@@ -49,10 +49,8 @@ struct LayersPanel: View {
             HStack {
                 Text("Opacity").font(.caption)
                 Slider(value: Binding(get: { layer.opacity },
-                                      set: { v in document.mutate { nb in
-                                          if let i = nb.pages[document.pageIndex].layers.firstIndex(where: { $0.id == layer.id }) {
-                                              nb.pages[document.pageIndex].layers[i].opacity = v
-                                          } } }), in: 0...1)
+                                      set: { v in document.updateLayer(layer.id, recordUndo: false) { $0.opacity = v } }),
+                       in: 0...1)
                 Picker("", selection: Binding(get: { layer.blendMode },
                                               set: { m in document.updateLayer(layer.id) { $0.blendMode = m } })) {
                     ForEach(BlendMode.allCases, id: \.self) { Text($0.rawValue.capitalized) }
@@ -60,7 +58,7 @@ struct LayersPanel: View {
             }
         }
         .contentShape(Rectangle())
-        .onTapGesture { document.activeLayerID = layer.id }
+        .onTapGesture { document.setActiveLayer(layer.id) }
     }
 
     private func icon(_ kind: LayerKind) -> String {

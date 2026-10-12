@@ -53,7 +53,7 @@ jobs:
           mkdir -p Payload && cp -R "$app" Payload/
           zip -qry Inkbook.ipa Payload
           ls -lh Inkbook.ipa
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: Inkbook-ipa
           path: Inkbook.ipa
