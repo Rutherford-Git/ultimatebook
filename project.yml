@@ -1,0 +1,38 @@
+name: Inkbook
+options:
+  bundleIdPrefix: app.inkbook
+  deploymentTarget:
+    iOS: "17.0"
+packages:
+  InkbookCore:
+    path: .
+targets:
+  Inkbook:
+    type: application
+    platform: iOS
+    sources: [App/Inkbook]
+    dependencies:
+      - package: InkbookCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.inkbook.Inkbook
+        TARGETED_DEVICE_FAMILY: "2"          # iPad
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: YES
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        # Notebooks are plain folders in Documents, visible in the Files app.
+        INFOPLIST_KEY_UIFileSharingEnabled: YES
+        INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace: YES
+    info:
+      path: App/Inkbook/Info.plist
+      properties:
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: com.goodnotes.goodnotes
+            UTTypeDescription: Goodnotes Notebook
+            UTTypeConformsTo: [public.data, public.zip-archive]
+            UTTypeTagSpecification:
+              public.filename-extension: [goodnotes]

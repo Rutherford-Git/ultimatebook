@@ -1,0 +1,28 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  core-linux:
+    name: InkbookCore tests (Linux)
+    runs-on: ubuntu-24.04
+    container: swift:6.1
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test
+
+  core-and-app-macos:
+    name: Core tests + iPad app build (macOS)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test
+      - run: brew install xcodegen
+      - run: xcodegen generate
+      - name: Build iPad app for the simulator
+        run: |
+          xcodebuild -project Inkbook.xcodeproj -scheme Inkbook \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO build | tail -n 40
+          test ${PIPESTATUS[0]} -eq 0

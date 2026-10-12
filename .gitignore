@@ -1,0 +1,10 @@
+.build/
+.swiftpm/
+*.xcodeproj
+xcuserdata/
+DerivedData/
+.DS_Store
+# Never commit personal notebooks or API keys.
+*.goodnotes
+*.inkbook/
+.env
