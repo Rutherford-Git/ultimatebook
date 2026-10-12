@@ -1,1 +1,65 @@
-# ultimatebook
+# Inkbook
+
+A local-first iPad notebook that combines **Goodnotes-style notes** (pages, vector ink, highlighter,
+text, images, PDF backgrounds) with **Procreate-style painting** (raster layers, pressure brushes,
+opacity and blend modes) — plus an **optional, approval-gated agent** you can point at your notebook.
+
+- **No cloud.** Notebooks are plain folders in the app's Documents (visible in Files). The app has no
+  sync, accounts or analytics.
+- **Agent is opt-in.** Off by default. When you enable it and save your own API key (stored in the
+  device Keychain), the agent can read pages and *propose* notes and highlights. Every change needs
+  your approval and lands on a separate **Agent layer** you can hide or delete.
+- **Imports Goodnotes.** `.goodnotes` files import with ink, colors, highlighter, images, text boxes,
+  PDF/image backgrounds and handwriting transcripts. Anything not converted is listed in the import
+  report. Format notes: [docs/GOODNOTES_FORMAT.md](docs/GOODNOTES_FORMAT.md).
+
+## Layout
+
+| Path | What | Builds on |
+|---|---|---|
+| `Sources/InkbookCore/Model` | Notebook → Page → Layer (vector / raster / agent) → Element | any |
+| `Sources/InkbookCore/Storage` | `.inkbook` bundle: `manifest.json`, `raster/*.png`, `assets/*`; atomic writes, schema versioning | any |
+| `Sources/InkbookCore/Brush` | Pressure curve, smoothing, raster dab spacing, vector eraser hit-testing | any |
+| `Sources/InkbookCore/Import/Goodnotes` | Protobuf wire reader, Apple LZ4, `tpl` decoder, importer + report | any |
+| `Sources/InkbookCore/Agent` | Tool definitions, approval protocol, Messages API client (raw HTTPS), tool-use loop | any |
+| `App/Inkbook` | SwiftUI/UIKit iPad app: canvas, layers, library, agent panel, Keychain | iOS 17+ |
+
+The core is platform-independent and tested on Linux and macOS. The app layer is a thin shell over it.
+
+## Build
+
+```bash
+swift test                       # core tests (Linux or macOS)
+brew install xcodegen            # once, on your Mac
+xcodegen generate                # creates Inkbook.xcodeproj from project.yml
+open Inkbook.xcodeproj           # run the "Inkbook" scheme on an iPad or iPad simulator
+```
+
+Check the importer against a real notebook (never committed):
+
+```bash
+INKBOOK_GOODNOTES_SAMPLE=~/Downloads/MyNotes.goodnotes INKBOOK_SVG_OUT=/tmp/pages swift test --filter testRealGoodnotesFileWhenProvided
+```
+
+## Agent bridge
+
+| Tool | Effect |
+|---|---|
+| `list_pages` | Page sizes, element counts, text previews |
+| `read_page` | Text boxes, handwriting transcript, element positions; optional page image |
+| `add_note` | Proposes a sticky note → approval sheet → Agent layer |
+| `add_highlight` | Proposes a highlight rectangle → approval sheet → Agent layer |
+
+Defaults: model `claude-opus-5-5`, effort `medium` (both changeable in Agent settings), adaptive
+thinking, server-side refusal fallback enabled (`fallbacks: "default"`, beta header
+`server-side-fallback-2026-07-01`). Assistant content is echoed back unchanged, so thinking blocks
+stay valid. Tools use `strict: true` schemas, and the loop runs tools one at a time so approvals arrive
+in order.
+
+## Status
+
+- Core: implemented and tested (23 tests; the real-file import test is opt-in).
+- iPad app: written against UIKit/SwiftUI/CoreGraphics. CI compiles it for the iOS simulator on
+  macOS (`.github/workflows/ci.yml`). It has not yet run on a device.
+- Next steps: PencilKit-grade latency (Metal renderer), lasso select/move, PDF import and export,
+  on-device handwriting recognition (Vision) for new ink, thumbnail grid.

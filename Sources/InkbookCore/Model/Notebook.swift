@@ -1,0 +1,212 @@
+import Foundation
+
+/// One input sample from Apple Pencil (or finger). Pressure/tilt are normalized 0...1.
+public struct InkPoint: Codable, Hashable, Sendable {
+    public var location: Point
+    public var pressure: Double
+    public var tilt: Double
+    /// Seconds since the stroke began.
+    public var time: Double
+
+    public init(_ location: Point, pressure: Double = 1, tilt: Double = 0, time: Double = 0) {
+        self.location = location; self.pressure = pressure; self.tilt = tilt; self.time = time
+    }
+}
+
+public enum BrushKind: String, Codable, Sendable, CaseIterable {
+    case pen          // vector ink, pressure-modulated width
+    case highlighter  // vector, flat width, translucent, drawn under ink
+    case pencil       // raster, textured dabs
+    case airbrush     // raster, soft dabs
+    case marker       // raster, hard round dabs
+    case eraser       // raster: clears pixels; vector: removes whole strokes
+}
+
+public struct Brush: Codable, Hashable, Sendable {
+    public var kind: BrushKind
+    public var color: RGBA
+    /// Nominal diameter in points at pressure 1.
+    public var size: Double
+    /// Fraction of `size` reached at pressure 0 (pressure sensitivity; 1 = none).
+    public var minSizeRatio: Double
+    /// Distance between raster dabs as a fraction of the current diameter.
+    public var spacing: Double
+    /// 0 = hard edge, 1 = fully soft (raster brushes).
+    public var softness: Double
+
+    public init(kind: BrushKind, color: RGBA, size: Double,
+                minSizeRatio: Double = 0.35, spacing: Double = 0.15, softness: Double = 0) {
+        self.kind = kind; self.color = color; self.size = size
+        self.minSizeRatio = minSizeRatio; self.spacing = spacing; self.softness = softness
+    }
+
+    public var isRaster: Bool { [.pencil, .airbrush, .marker].contains(kind) }
+
+    public static let pen = Brush(kind: .pen, color: .black, size: 2.5)
+    public static let highlighter = Brush(kind: .highlighter, color: .highlighterYellow, size: 18, minSizeRatio: 1)
+}
+
+/// A vector stroke. Geometry is the smoothed input polyline; renderers build curves from it.
+public struct Stroke: Codable, Hashable, Sendable, Identifiable {
+    public var id: UUID
+    public var brush: Brush
+    public var points: [InkPoint]
+
+    public init(id: UUID = UUID(), brush: Brush, points: [InkPoint]) {
+        self.id = id; self.brush = brush; self.points = points
+    }
+
+    public var bounds: Rect? {
+        guard let r = Rect.bounding(points.map(\.location)) else { return nil }
+        let pad = brush.size / 2
+        return Rect(x: r.minX - pad, y: r.minY - pad, width: r.size.width + 2 * pad, height: r.size.height + 2 * pad)
+    }
+}
+
+public struct TextBox: Codable, Hashable, Sendable, Identifiable {
+    public var id: UUID
+    public var frame: Rect
+    public var text: String
+    public var fontSize: Double
+    public var color: RGBA
+    /// Translucent fill behind the text (used for agent sticky notes); nil = none.
+    public var background: RGBA?
+
+    public init(id: UUID = UUID(), frame: Rect, text: String, fontSize: Double = 18,
+                color: RGBA = .black, background: RGBA? = nil) {
+        self.id = id; self.frame = frame; self.text = text
+        self.fontSize = fontSize; self.color = color; self.background = background
+    }
+}
+
+public struct PlacedImage: Codable, Hashable, Sendable, Identifiable {
+    public var id: UUID
+    public var frame: Rect
+    /// File name inside the notebook's `assets/` directory.
+    public var asset: String
+
+    public init(id: UUID = UUID(), frame: Rect, asset: String) {
+        self.id = id; self.frame = frame; self.asset = asset
+    }
+}
+
+/// Filled translucent rectangle, e.g. an agent highlight over a region.
+public struct HighlightRegion: Codable, Hashable, Sendable, Identifiable {
+    public var id: UUID
+    public var frame: Rect
+    public var color: RGBA
+    public init(id: UUID = UUID(), frame: Rect, color: RGBA = .highlighterYellow) {
+        self.id = id; self.frame = frame; self.color = color
+    }
+}
+
+public enum Element: Codable, Hashable, Sendable, Identifiable {
+    case stroke(Stroke)
+    case text(TextBox)
+    case image(PlacedImage)
+    case highlight(HighlightRegion)
+
+    public var id: UUID {
+        switch self {
+        case .stroke(let s): s.id
+        case .text(let t): t.id
+        case .image(let i): i.id
+        case .highlight(let h): h.id
+        }
+    }
+}
+
+public enum LayerKind: String, Codable, Sendable {
+    /// Goodnotes-style: editable vector strokes, text, images.
+    case vector
+    /// Procreate-style: a bitmap stored as `raster/<layerId>.png` (page size x scale).
+    case raster
+    /// Vector layer that only the agent bridge writes to (after user approval).
+    case agent
+}
+
+public enum BlendMode: String, Codable, Sendable, CaseIterable {
+    case normal, multiply, screen, overlay
+}
+
+public struct Layer: Codable, Hashable, Sendable, Identifiable {
+    public var id: UUID
+    public var name: String
+    public var kind: LayerKind
+    public var isVisible: Bool
+    public var isLocked: Bool
+    public var opacity: Double
+    public var blendMode: BlendMode
+    /// Vector content (empty for raster layers).
+    public var elements: [Element]
+
+    public init(id: UUID = UUID(), name: String, kind: LayerKind, isVisible: Bool = true,
+                isLocked: Bool = false, opacity: Double = 1, blendMode: BlendMode = .normal,
+                elements: [Element] = []) {
+        self.id = id; self.name = name; self.kind = kind; self.isVisible = isVisible
+        self.isLocked = isLocked; self.opacity = opacity; self.blendMode = blendMode
+        self.elements = elements
+    }
+}
+
+public enum Paper: Codable, Hashable, Sendable {
+    case blank(RGBA)
+    case ruled(RGBA, spacing: Double)
+    case grid(RGBA, spacing: Double)
+    case dotted(RGBA, spacing: Double)
+    /// PDF or image background from `assets/` (PDF: 0-based page index).
+    case asset(String, pdfPage: Int?)
+}
+
+public struct Page: Codable, Hashable, Sendable, Identifiable {
+    public var id: UUID
+    public var size: Size
+    public var paper: Paper
+    /// Bottom-to-top draw order.
+    public var layers: [Layer]
+    /// Handwriting text recognized for this page (imported or on-device), keyed by nothing:
+    /// a plain reading-order transcript the agent can read.
+    public var recognizedText: String?
+
+    public init(id: UUID = UUID(), size: Size = .letter, paper: Paper = .blank(.white),
+                layers: [Layer]? = nil, recognizedText: String? = nil) {
+        self.id = id; self.size = size; self.paper = paper
+        self.layers = layers ?? [Layer(name: "Ink", kind: .vector)]
+        self.recognizedText = recognizedText
+    }
+
+    public var agentLayerIndex: Int? { layers.firstIndex { $0.kind == .agent } }
+
+    /// Returns the agent layer index, creating the layer on top when missing.
+    public mutating func ensureAgentLayer() -> Int {
+        if let i = agentLayerIndex { return i }
+        layers.append(Layer(name: "Agent", kind: .agent))
+        return layers.count - 1
+    }
+
+    /// All text the page carries: typed text boxes (in layer order) then recognized handwriting.
+    public var allText: String {
+        var parts: [String] = []
+        for layer in layers where layer.isVisible {
+            for case .text(let t) in layer.elements { parts.append(t.text) }
+        }
+        if let r = recognizedText, !r.isEmpty { parts.append(r) }
+        return parts.joined(separator: "\n")
+    }
+}
+
+public struct Notebook: Codable, Hashable, Sendable, Identifiable {
+    public static let schemaVersion = 1
+
+    public var id: UUID
+    public var title: String
+    public var created: Date
+    public var modified: Date
+    public var pages: [Page]
+
+    public init(id: UUID = UUID(), title: String, pages: [Page] = [Page()],
+                created: Date = Date(), modified: Date = Date()) {
+        self.id = id; self.title = title; self.pages = pages
+        self.created = created; self.modified = modified
+    }
+}
