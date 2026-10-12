@@ -2,6 +2,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   core-linux:
@@ -9,14 +10,14 @@ jobs:
     runs-on: ubuntu-24.04
     container: swift:6.1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: swift test
 
   core-and-app-macos:
     name: Core tests + iPad app build (macOS)
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: swift test
       - run: brew install xcodegen
       - run: xcodegen generate
@@ -26,3 +27,42 @@ jobs:
             -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO build | tail -n 40
           test ${PIPESTATUS[0]} -eq 0
+
+  ipa:
+    name: Unsigned IPA for sideloading
+    needs: [core-linux, core-and-app-macos]
+    if: github.event_name != 'pull_request'
+    runs-on: macos-15
+    permissions:
+      contents: write   # publish the rolling "latest" release
+    steps:
+      - uses: actions/checkout@v5
+      - run: brew install xcodegen
+      - run: xcodegen generate
+      - name: Build for iPad (device, unsigned)
+        run: |
+          xcodebuild -project Inkbook.xcodeproj -scheme Inkbook -configuration Release \
+            -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build | tail -n 30
+          test ${PIPESTATUS[0]} -eq 0
+      - name: Package Inkbook.ipa
+        run: |
+          app=build/Build/Products/Release-iphoneos/Inkbook.app
+          test -x "$app/Inkbook"
+          lipo -archs "$app/Inkbook"
+          mkdir -p Payload && cp -R "$app" Payload/
+          zip -qry Inkbook.ipa Payload
+          ls -lh Inkbook.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Inkbook-ipa
+          path: Inkbook.ipa
+      - name: Publish rolling "latest" release (main only)
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest Inkbook.ipa --prerelease --target "$GITHUB_SHA" \
+            --title "Inkbook (latest main build)" \
+            --notes "Unsigned build of ${GITHUB_SHA::7}. Install with Sideloadly or AltStore, which sign it with your Apple ID."

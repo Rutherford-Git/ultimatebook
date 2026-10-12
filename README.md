@@ -41,6 +41,21 @@ Check the importer against a real notebook (never committed):
 INKBOOK_GOODNOTES_SAMPLE=~/Downloads/MyNotes.goodnotes INKBOOK_SVG_OUT=/tmp/pages swift test --filter testRealGoodnotesFileWhenProvided
 ```
 
+## Install on iPad without a Mac (sideload)
+
+Every push to `main` builds an unsigned `Inkbook.ipa` on GitHub's macOS runners and publishes it as
+the **latest** release (Releases → *Inkbook (latest main build)*; also attached to each CI run as
+the `Inkbook-ipa` artifact).
+
+1. Download `Inkbook.ipa` from the release.
+2. Install it with **Sideloadly** (Windows/macOS) or **AltStore** (Windows + iPad), which sign it with
+   your Apple ID.
+3. On the iPad: Settings → General → VPN & Device Management → trust your Apple ID. On iPadOS 16+
+   also turn on Settings → Privacy & Security → Developer Mode.
+4. With a free Apple ID the app expires after 7 days; refresh it from AltStore or re-install with
+   Sideloadly. Notebooks stay in the app's Documents folder across re-installs if the bundle ID stays
+   the same.
+
 ## Agent bridge
 
 | Tool | Effect |
