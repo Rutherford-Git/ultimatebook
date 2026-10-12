@@ -6,6 +6,7 @@ struct NotebookView: View {
     var close: () -> Void
     @State private var showLayers = false
     @State private var showAgent = false
+    @State private var showAgentSettings = false
     @StateObject private var chat = AgentChatModel()
     @State private var exported: ExportedFile?
     @State private var exportError: String?
@@ -13,7 +14,8 @@ struct NotebookView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            toolbar
+            navigationRow
+            toolRow
             Divider()
             CanvasView(document: document)
                 .ignoresSafeArea(edges: .bottom)
@@ -27,44 +29,87 @@ struct NotebookView: View {
         .sheet(isPresented: $showAgent) {
             AgentPanel(document: document, chat: chat).presentationDetents([.medium, .large])
         }
+        .sheet(isPresented: $showAgentSettings) { AgentSettingsView() }
         // Approvals are presented here only while the agent panel is closed; otherwise the panel shows them.
-        .approvalSheet(for: document, enabled: !showAgent)
+        .approvalSheet(for: document, enabled: !showAgent && !showAgentSettings)
     }
 
-    private var toolbar: some View {
-        HStack(spacing: 14) {
-            Button(action: close) { Image(systemName: "chevron.left") }
-            Text(document.notebook.title).font(.headline).lineLimit(1)
-            Spacer()
+    /// Row 1: navigation, pages and notebook-level actions.
+    private var navigationRow: some View {
+        HStack(spacing: 4) {
+            iconButton("chevron.left", label: "Library", action: close)
+            Text(document.notebook.title)
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .padding(.leading, 4)
+            Spacer(minLength: 12)
+            pageControls
+            Divider().frame(height: 18).padding(.horizontal, 4)
+            iconButton("square.3.layers.3d", label: "Layers") { showLayers = true }
+            iconButton("square.and.arrow.up", label: "Export PDF") {
+                document.saveNow()
+                do { exported = ExportedFile(url: try document.exportPDF()) } catch { exportError = error.localizedDescription }
+            }
+            iconButton("sparkles", label: "Agent") {
+                if agentEnabled, KeychainStore.load() != nil { showAgent = true } else { showAgentSettings = true }
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 40)
+        .background(.bar)
+    }
+
+    /// Row 2: drawing tools, color, size, undo/redo.
+    private var toolRow: some View {
+        HStack(spacing: 2) {
             ForEach(Tool.allCases) { tool in
                 Button { document.select(tool) } label: {
                     Image(systemName: tool.symbol)
-                        .padding(6)
-                        .background(document.tool == tool ? Color.accentColor.opacity(0.2) : .clear, in: RoundedRectangle(cornerRadius: 6))
+                        .font(.system(size: 15, weight: .medium))
+                        .frame(width: 32, height: 30)
+                        .background(document.tool == tool ? Color.accentColor.opacity(0.18) : .clear,
+                                    in: RoundedRectangle(cornerRadius: 7))
                 }
+                .buttonStyle(.borderless)
                 .accessibilityLabel(tool.rawValue.capitalized)
             }
-            ColorPicker("", selection: colorBinding, supportsOpacity: true).labelsHidden().frame(width: 32)
-            Slider(value: sizeBinding, in: 0.5...80).frame(width: 110)
-            Divider().frame(height: 24)
-            Button { document.undo() } label: { Image(systemName: "arrow.uturn.backward") }.disabled(!document.canUndo)
-            Button { document.redo() } label: { Image(systemName: "arrow.uturn.forward") }.disabled(!document.canRedo)
-            Toggle(isOn: $document.pencilOnly) { Image(systemName: "applepencil") }.toggleStyle(.button)
-            Button { showLayers = true } label: { Image(systemName: "square.3.layers.3d") }
-            pageControls
-            Button {
-                document.saveNow()
-                do { exported = ExportedFile(url: try document.exportPDF()) } catch { exportError = error.localizedDescription }
-            } label: { Image(systemName: "square.and.arrow.up") }
-            .accessibilityLabel("Export PDF")
-            if agentEnabled {
-                Button { showAgent = true } label: { Image(systemName: "sparkles") }
-                    .accessibilityLabel("Agent")
+            Divider().frame(height: 18).padding(.horizontal, 6)
+            ColorPicker("", selection: colorBinding, supportsOpacity: true)
+                .labelsHidden()
+                .scaleEffect(0.8)
+                .frame(width: 30)
+            Slider(value: sizeBinding, in: 0.5...80)
+                .controlSize(.mini)
+                .frame(width: 90)
+            Text(String(format: "%.1f", document.brush.size))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 30, alignment: .leading)
+            Divider().frame(height: 18).padding(.horizontal, 6)
+            iconButton("arrow.uturn.backward", label: "Undo") { document.undo() }.disabled(!document.canUndo)
+            iconButton("arrow.uturn.forward", label: "Redo") { document.redo() }.disabled(!document.canRedo)
+            Toggle(isOn: $document.pencilOnly) {
+                Image(systemName: "applepencil").font(.system(size: 15))
             }
+            .toggleStyle(.button)
+            .controlSize(.small)
+            .accessibilityLabel("Draw with Apple Pencil only")
         }
-        .padding(.horizontal)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 10)
+        .frame(height: 38)
+        .frame(maxWidth: .infinity)
         .background(.bar)
+    }
+
+    private func iconButton(_ symbol: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 15, weight: .medium))
+                .frame(width: 32, height: 30)
+        }
+        .buttonStyle(.borderless)
+        .accessibilityLabel(label)
     }
 
     private var selectionBar: some View {
@@ -74,19 +119,22 @@ struct NotebookView: View {
             Button(role: .destructive) { document.deleteSelection() } label: { Label("Delete", systemImage: "trash") }
             Button { document.clearSelection() } label: { Text("Done").bold() }
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
+        .font(.subheadline)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 9)
         .background(.regularMaterial, in: Capsule())
-        .padding(.bottom, 24)
+        .padding(.bottom, 20)
     }
 
     private var pageControls: some View {
-        HStack(spacing: 6) {
-            Button { document.pageIndex -= 1 } label: { Image(systemName: "chevron.up") }.disabled(document.pageIndex == 0)
-            Text("\(document.pageIndex + 1)/\(document.notebook.pages.count)").monospacedDigit().font(.caption)
-            Button { document.pageIndex += 1 } label: { Image(systemName: "chevron.down") }
+        HStack(spacing: 0) {
+            iconButton("chevron.up", label: "Previous page") { document.pageIndex -= 1 }.disabled(document.pageIndex == 0)
+            Text("\(document.pageIndex + 1) / \(document.notebook.pages.count)")
+                .font(.caption.monospacedDigit())
+                .frame(minWidth: 44)
+            iconButton("chevron.down", label: "Next page") { document.pageIndex += 1 }
                 .disabled(document.pageIndex >= document.notebook.pages.count - 1)
-            Button { document.addPage() } label: { Image(systemName: "doc.badge.plus") }
+            iconButton("doc.badge.plus", label: "Add page") { document.addPage() }
         }
     }
 

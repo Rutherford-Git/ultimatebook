@@ -70,7 +70,7 @@ final class DocumentModel: ObservableObject {
     init(store: NotebookStore) throws {
         self.store = store
         notebook = try store.load()
-        activeLayerID = notebook.pages.first?.layers.last(where: { $0.kind != .agent })?.id
+        activeLayerID = notebook.pages.first.flatMap(Self.defaultLayer)?.id
     }
 
     var page: Page { notebook.pages[pageIndex] }
@@ -152,20 +152,45 @@ final class DocumentModel: ObservableObject {
         mutate(dirty: dirty, inkChanged: true) { $0.pages[self.pageIndex].layers[li].elements.removeAll { hits.contains($0.id) } }
     }
 
-    func undo() { swapHistory(from: &undoStack, to: &redoStack) }
-    func redo() { swapHistory(from: &redoStack, to: &undoStack) }
+    func undo() {
+        guard let snap = undoStack.popLast() else { return }
+        redoStack.append(currentState(matching: snap))
+        restore(snap)
+    }
 
-    private func swapHistory(from: inout [Snapshot], to: inout [Snapshot]) {
-        guard let snap = from.popLast() else { return }
-        to.append(Snapshot(notebook: notebook, raster: snap.raster.map { ($0.0, bitmaps[$0.0]?.snapshot()) }))
+    func redo() {
+        guard let snap = redoStack.popLast() else { return }
+        undoStack.append(currentState(matching: snap))
+        restore(snap)
+    }
+
+    /// Current state, capturing the same raster layer as `snap` so the two can be swapped.
+    private func currentState(matching snap: Snapshot) -> Snapshot {
+        Snapshot(notebook: notebook, raster: snap.raster.map { ($0.0, bitmaps[$0.0]?.snapshot()) })
+    }
+
+    private func restore(_ snap: Snapshot) {
         notebook = snap.notebook
         if let (id, image) = snap.raster { bitmaps[id]?.restore(image) }
         pageIndex = min(pageIndex, notebook.pages.count - 1)
         selection = []
+        ensureValidActiveLayer()
         pagesNeedingRecognition.insert(page.id)
         updateUndoState()
         invalidate(nil)
         scheduleSave()
+    }
+
+    /// Keeps `activeLayerID` pointing at a layer of the current page (undo can remove layers).
+    private func ensureValidActiveLayer() {
+        if !page.layers.contains(where: { $0.id == activeLayerID }) {
+            activeLayerID = Self.defaultLayer(of: page)?.id
+        }
+    }
+
+    /// Preferred drawing layer: topmost unlocked vector layer, else any non-agent layer.
+    static func defaultLayer(of page: Page) -> Layer? {
+        page.layers.last { $0.kind == .vector && !$0.isLocked } ?? page.layers.last { $0.kind != .agent } ?? page.layers.first
     }
 
     private func updateUndoState() { canUndo = !undoStack.isEmpty; canRedo = !redoStack.isEmpty }
@@ -193,20 +218,23 @@ final class DocumentModel: ObservableObject {
 
     // MARK: Lasso selection
 
+    /// Lasso works across every visible, unlocked vector and agent layer of the page (not just the
+    /// active layer), so it behaves the same whatever layer was last used.
+    private var selectableLayerIndices: [Int] {
+        page.layers.indices.filter { page.layers[$0].kind != .raster && page.layers[$0].isVisible && !page.layers[$0].isLocked }
+    }
+
     var selectionBounds: Rect? {
-        guard let li = activeLayerIndex else { return nil }
-        return Lasso.bounds(of: selection, in: page.layers[li].elements)
+        guard !selection.isEmpty else { return nil }
+        return Lasso.bounds(of: selection, in: selectableLayerIndices.flatMap { page.layers[$0].elements })
     }
 
     var selectedElements: [Element] {
-        guard let li = activeLayerIndex else { return [] }
-        return page.layers[li].elements.filter { selection.contains($0.id) }
+        selectableLayerIndices.flatMap { page.layers[$0].elements.filter { selection.contains($0.id) } }
     }
 
-    /// Selects the elements of the active vector/agent layer enclosed by `polygon`.
     func lassoSelect(_ polygon: [InkbookCore.Point]) {
-        guard let li = activeLayerIndex, page.layers[li].kind != .raster else { selection = []; return }
-        selection = Set(Lasso.select(polygon, in: page.layers[li].elements))
+        selection = Set(selectableLayerIndices.flatMap { Lasso.select(polygon, in: page.layers[$0].elements) })
     }
 
     func clearSelection() {
@@ -214,36 +242,50 @@ final class DocumentModel: ObservableObject {
         selection = []
     }
 
-    func moveSelection(by offset: InkbookCore.Point) {
-        guard let li = activeLayerIndex, !selection.isEmpty, !page.layers[li].isLocked,
-              offset.x != 0 || offset.y != 0, let before = selectionBounds else { return }
-        beginEdit()
-        let ids = selection
-        let after = Rect(x: before.minX + offset.x, y: before.minY + offset.y, width: before.size.width, height: before.size.height)
-        mutate(dirty: Rect.bounding([before.origin, Point(before.maxX, before.maxY), after.origin, Point(after.maxX, after.maxY)]),
-               inkChanged: true) { nb in
-            nb.pages[self.pageIndex].layers[li].elements = nb.pages[self.pageIndex].layers[li].elements.map {
-                ids.contains($0.id) ? $0.translated(by: offset) : $0
+    /// Applies `transform` to the selected elements of every selectable layer.
+    private func editSelection(dirty: Rect?, _ transform: @escaping (_ selected: [Element]) -> (keep: Bool, add: [Element])) {
+        let ids = selection, layers = selectableLayerIndices, pageIndex = pageIndex
+        mutate(dirty: dirty, inkChanged: true) { nb in
+            for li in layers {
+                let elements = nb.pages[pageIndex].layers[li].elements
+                let selected = elements.filter { ids.contains($0.id) }
+                guard !selected.isEmpty else { continue }
+                let (keep, add) = transform(selected)
+                if !keep { nb.pages[pageIndex].layers[li].elements.removeAll { ids.contains($0.id) } }
+                nb.pages[pageIndex].layers[li].elements.append(contentsOf: add)
             }
         }
     }
 
-    func deleteSelection() {
-        guard let li = activeLayerIndex, !selection.isEmpty, !page.layers[li].isLocked else { return }
+    func moveSelection(by offset: InkbookCore.Point) {
+        guard !selection.isEmpty, offset.x != 0 || offset.y != 0, let before = selectionBounds else { return }
         beginEdit()
-        let ids = selection, dirty = selectionBounds
-        mutate(dirty: dirty, inkChanged: true) { $0.pages[self.pageIndex].layers[li].elements.removeAll { ids.contains($0.id) } }
+        let after = Rect(x: before.minX + offset.x, y: before.minY + offset.y, width: before.size.width, height: before.size.height)
+        let dirty = Rect.bounding([before.origin, Point(before.maxX, before.maxY), after.origin, Point(after.maxX, after.maxY)])
+        // Replace in place (remove + re-add) so stacking order within the layer is kept for the group.
+        editSelection(dirty: dirty) { selected in (false, selected.map { $0.translated(by: offset) }) }
+    }
+
+    func deleteSelection() {
+        guard !selection.isEmpty else { return }
+        beginEdit()
+        editSelection(dirty: selectionBounds) { _ in (false, []) }
         selection = []
     }
 
-    /// Copies the selection 24 pt down-right and selects the copies.
+    /// Copies the selection 24 pt down-right (each copy on its source layer) and selects the copies.
     func duplicateSelection() {
-        guard let li = activeLayerIndex, !selection.isEmpty, !page.layers[li].isLocked else { return }
+        guard !selection.isEmpty, let before = selectionBounds else { return }
         beginEdit()
-        let copies = selectedElements.map { $0.withNewID().translated(by: Point(24, 24)) }
-        let dirty = Lasso.bounds(of: Set(copies.map(\.id)), in: copies)
-        mutate(dirty: dirty, inkChanged: true) { $0.pages[self.pageIndex].layers[li].elements.append(contentsOf: copies) }
-        selection = Set(copies.map(\.id))
+        var newIDs: Set<UUID> = []
+        let offset = Point(24, 24)
+        let dirty = Rect(x: before.minX + 24, y: before.minY + 24, width: before.size.width, height: before.size.height)
+        editSelection(dirty: dirty) { selected in
+            let copies = selected.map { $0.withNewID().translated(by: offset) }
+            newIDs.formUnion(copies.map(\.id))
+            return (true, copies)
+        }
+        selection = newIDs
     }
 
     // MARK: Pages and layers
@@ -251,9 +293,7 @@ final class DocumentModel: ObservableObject {
     private func onPageChanged() {
         guard notebook.pages.indices.contains(pageIndex) else { return }
         selection = []
-        if !page.layers.contains(where: { $0.id == activeLayerID }) {
-            activeLayerID = page.layers.last(where: { $0.kind != .agent })?.id ?? page.layers.first?.id
-        }
+        ensureValidActiveLayer()
         invalidate(nil)
     }
 
@@ -278,7 +318,6 @@ final class DocumentModel: ObservableObject {
 
     func setActiveLayer(_ id: UUID) {
         activeLayerID = id
-        selection = []
     }
 
     func updateLayer(_ id: UUID, recordUndo: Bool = true, _ change: @escaping (inout Layer) -> Void) {

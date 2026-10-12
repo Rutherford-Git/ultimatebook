@@ -122,7 +122,7 @@ struct AgentSettingsView: View {
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                     Button("Save key") {
-                        do { try KeychainStore.save(key.trimmingCharacters(in: .whitespacesAndNewlines)); key = ""; hasKey = true }
+                        do { try KeychainStore.save(key.trimmingCharacters(in: .whitespacesAndNewlines)); key = ""; hasKey = true; enabled = true }
                         catch { self.error = "Could not save key: \(error.localizedDescription)" }
                     }.disabled(key.isEmpty)
                     if hasKey {
