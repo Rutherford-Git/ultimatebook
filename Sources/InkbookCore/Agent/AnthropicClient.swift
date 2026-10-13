@@ -20,7 +20,7 @@ public enum AgentAPIError: Error, Equatable, CustomStringConvertible {
 
     public var description: String {
         switch self {
-        case .authentication: "The API key was rejected. Check it in Agent settings."
+        case .authentication(let m): "The API key was not accepted (\(m)). Use an API key from console.anthropic.com, not a claude.ai login."
         case .permission(let m): "The API key is not allowed to do this: \(m)"
         case .invalidRequest(let m): "The API rejected the request: \(m)"
         case .rateLimited(let after): "Rate limited" + (after.map { "; retry in \(Int($0)) s" } ?? "")
@@ -75,28 +75,50 @@ public struct AnthropicHTTPTransport: MessagesTransport {
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        request.setValue(Self.fallbackBeta, forHTTPHeaderField: "anthropic-beta")
+        if body["fallbacks"] != nil { request.setValue(Self.fallbackBeta, forHTTPHeaderField: "anthropic-beta") }
         request.httpBody = try body.encoded()
+        return try await Self.execute(request)
+    }
 
+    /// Checks the key without spending tokens (lists one model). Throws the same errors as `send`.
+    public func verifyKey() async throws {
+        var url = URLComponents(url: endpoint.deletingLastPathComponent().appendingPathComponent("models"),
+                                resolvingAgainstBaseURL: false)!
+        url.queryItems = [URLQueryItem(name: "limit", value: "1")]
+        var request = URLRequest(url: url.url!)
+        request.timeoutInterval = 30
+        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        _ = try await Self.execute(request)
+    }
+
+    private static func execute(_ request: URLRequest) async throws -> JSONValue {
         let (data, response): (Data, URLResponse)
-        do { (data, response) = try await Self.perform(request) } catch {
+        do { (data, response) = try await perform(request) } catch {
             throw AgentAPIError.network(error.localizedDescription)
         }
         guard let http = response as? HTTPURLResponse else { throw AgentAPIError.malformedResponse }
         let json = try? JSONValue.decode(data)
-        guard (200..<300).contains(http.statusCode) else {
-            let message = json?["error"]?["message"]?.string ?? HTTPURLResponse.localizedString(forStatusCode: http.statusCode)
-            switch http.statusCode {
-            case 400, 404, 413, 422: throw AgentAPIError.invalidRequest(message)
-            case 401: throw AgentAPIError.authentication(message)
-            case 403: throw AgentAPIError.permission(message)
-            case 429: throw AgentAPIError.rateLimited(retryAfter: (http.value(forHTTPHeaderField: "retry-after")).flatMap(Double.init))
-            case 529: throw AgentAPIError.overloaded
-            default: throw AgentAPIError.server(status: http.statusCode, message: message)
-            }
+        if let failure = error(status: http.statusCode, body: json, retryAfter: http.value(forHTTPHeaderField: "retry-after")) {
+            throw failure
         }
         guard let json else { throw AgentAPIError.malformedResponse }
         return json
+    }
+
+    /// Maps an HTTP status and error body to a typed error (nil for success). The API's own
+    /// message is kept so users see e.g. "invalid x-api-key" or "model: ... not found".
+    static func error(status: Int, body: JSONValue?, retryAfter: String?) -> AgentAPIError? {
+        guard !(200..<300).contains(status) else { return nil }
+        let message = body?["error"]?["message"]?.string ?? HTTPURLResponse.localizedString(forStatusCode: status)
+        switch status {
+        case 400, 404, 413, 422: return .invalidRequest(message)
+        case 401: return .authentication(message)
+        case 403: return .permission(message)
+        case 429: return .rateLimited(retryAfter: retryAfter.flatMap(Double.init))
+        case 529: return .overloaded
+        default: return .server(status: status, message: message)
+        }
     }
 
     /// Continuation wrapper so the same code runs on Apple platforms and swift-corelibs-foundation.

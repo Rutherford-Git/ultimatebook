@@ -61,7 +61,8 @@ final class AgentChatModel: ObservableObject {
     @Published var lines: [Line] = []
     @Published var isWorking = false
     private var session: AgentSession?
-    private var sessionKey: String?
+    /// Key + model + effort the session was built with; any change starts a new session.
+    private var sessionSignature: String?
 
     func reset() {
         lines.removeAll()
@@ -72,13 +73,14 @@ final class AgentChatModel: ObservableObject {
         guard let key = KeychainStore.load(), !key.isEmpty else {
             lines.append(Line(text: "Add an API key in Agent settings first.", fromUser: false)); return
         }
-        if session == nil || sessionKey != key {
-            let defaults = UserDefaults.standard
-            let config = AgentConfiguration(
-                model: defaults.string(forKey: "agent.model") ?? AgentConfiguration.default.model,
-                effort: defaults.string(forKey: "agent.effort") ?? AgentConfiguration.default.effort)
+        let defaults = UserDefaults.standard
+        let config = AgentConfiguration(
+            model: defaults.string(forKey: "agent.model") ?? AgentConfiguration.default.model,
+            effort: defaults.string(forKey: "agent.effort") ?? AgentConfiguration.default.effort)
+        let signature = "\(key.hashValue)|\(config.model)|\(config.effort)"
+        if session == nil || sessionSignature != signature {
             session = AgentSession(transport: AnthropicHTTPTransport(apiKey: key), host: host, configuration: config)
-            sessionKey = key
+            sessionSignature = signature
         }
         lines.append(Line(text: text, fromUser: true))
         isWorking = true
@@ -106,7 +108,8 @@ struct AgentSettingsView: View {
     @AppStorage("agent.effort") private var effort = AgentConfiguration.default.effort
     @State private var key = ""
     @State private var hasKey = KeychainStore.load() != nil
-    @State private var error: String?
+    @State private var status: (ok: Bool, text: String)?
+    @State private var testing = false
 
     var body: some View {
         NavigationStack {
@@ -116,29 +119,62 @@ struct AgentSettingsView: View {
                 } footer: {
                     Text("When enabled, pages you ask about (text, and page images when the agent requests them) are sent to the API endpoint using your own key. Nothing is sent otherwise. Every change the agent proposes needs your approval and goes on a separate Agent layer.")
                 }
-                Section("API key") {
-                    SecureField(hasKey ? "Saved — enter a new key to replace" : "sk-ant-…", text: $key)
-                        .textContentType(.password)
+                Section {
+                    SecureField(hasKey ? "Saved — enter a new key to replace" : "sk-ant-api…", text: $key)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                     Button("Save key") {
-                        do { try KeychainStore.save(key.trimmingCharacters(in: .whitespacesAndNewlines)); key = ""; hasKey = true; enabled = true }
-                        catch { self.error = "Could not save key: \(error.localizedDescription)" }
-                    }.disabled(key.isEmpty)
+                        do {
+                            try KeychainStore.save(Self.clean(key))
+                            key = ""; hasKey = true; enabled = true
+                            Task { await test() }
+                        } catch { status = (false, "Could not save key: \(error.localizedDescription)") }
+                    }.disabled(Self.clean(key).isEmpty)
                     if hasKey {
-                        Button("Remove key", role: .destructive) { KeychainStore.delete(); hasKey = false }
+                        Button(testing ? "Testing…" : "Test key") { Task { await test() } }.disabled(testing)
+                        Button("Remove key", role: .destructive) { KeychainStore.delete(); hasKey = false; status = nil }
                     }
+                    if let status {
+                        Label(status.text, systemImage: status.ok ? "checkmark.circle.fill" : "xmark.octagon.fill")
+                            .foregroundStyle(status.ok ? .green : .red)
+                            .font(.callout)
+                    }
+                } header: { Text("API key") } footer: {
+                    Text("Use an API key from console.anthropic.com (starts with sk-ant-api). A claude.ai subscription login is not an API key.")
                 }
                 Section("Model") {
-                    TextField("Model", text: $model).autocorrectionDisabled().textInputAutocapitalization(.never)
+                    Picker("Model", selection: $model) {
+                        ForEach(modelChoices, id: \.self) { Text($0) }
+                    }
                     Picker("Effort", selection: $effort) {
                         ForEach(["low", "medium", "high", "xhigh", "max"], id: \.self) { Text($0) }
                     }
                 }
-                if let error { Text(error).foregroundStyle(.red) }
             }
             .navigationTitle("Agent settings")
             .toolbar { Button("Done") { dismiss() } }
+        }
+    }
+
+    /// Known models, plus a previously typed custom value so it is not silently replaced.
+    private var modelChoices: [String] {
+        AgentConfiguration.knownModels + (AgentConfiguration.knownModels.contains(model) ? [] : [model])
+    }
+
+    /// Pasted keys sometimes carry spaces or line breaks; keys never contain whitespace.
+    static func clean(_ key: String) -> String {
+        key.components(separatedBy: .whitespacesAndNewlines).joined()
+    }
+
+    private func test() async {
+        guard let stored = KeychainStore.load() else { return }
+        testing = true
+        defer { testing = false }
+        do {
+            try await AnthropicHTTPTransport(apiKey: stored, maxRetries: 0).verifyKey()
+            status = (true, "Key works.")
+        } catch {
+            status = (false, "\(error)")
         }
     }
 }

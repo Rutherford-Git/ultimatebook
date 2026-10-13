@@ -178,16 +178,37 @@ public enum Element: Codable, Hashable, Sendable, Identifiable {
         }
     }
 
-    /// Representative points used by lasso selection: geometry for ink, corners + center for boxes.
+    /// Points evenly spread over the element, used by lasso selection: ink is resampled by arc
+    /// length (so slowly written parts don't outweigh fast ones), boxes use a 3×3 grid.
     public var samplePoints: [Point] {
         switch self {
-        case .stroke(let s): return s.points.map(\.location)
-        case .shape(let s): return s.path.flatMap(\.points)
+        case .stroke(let s): return Self.resample(s.points.map(\.location), count: 24)
+        case .shape(let s): return Self.resample(s.path.flatMap(\.points), count: 24)
         case .text, .image, .highlight:
             guard let r = bounds else { return [] }
-            return [r.origin, Point(r.maxX, r.minY), Point(r.minX, r.maxY), Point(r.maxX, r.maxY),
-                    Point((r.minX + r.maxX) / 2, (r.minY + r.maxY) / 2)]
+            return [0.1, 0.5, 0.9].flatMap { fy in
+                [0.1, 0.5, 0.9].map { fx in Point(r.minX + r.size.width * fx, r.minY + r.size.height * fy) }
+            }
         }
+    }
+
+    /// `count` points evenly spaced along a polyline (endpoints included).
+    static func resample(_ pts: [Point], count: Int) -> [Point] {
+        guard pts.count > 1, count > 1 else { return pts }
+        var cumulative = [0.0]
+        for (a, b) in zip(pts, pts.dropFirst()) { cumulative.append(cumulative[cumulative.count - 1] + a.distance(to: b)) }
+        let total = cumulative[cumulative.count - 1]
+        guard total > 0 else { return [pts[0]] }
+        var out: [Point] = []
+        var seg = 0
+        for i in 0..<count {
+            let target = total * Double(i) / Double(count - 1)
+            while seg < pts.count - 2, cumulative[seg + 1] < target { seg += 1 }
+            let len = cumulative[seg + 1] - cumulative[seg]
+            let t = len > 0 ? (target - cumulative[seg]) / len : 0
+            out.append(pts[seg] + (pts[seg + 1] - pts[seg]) * t)
+        }
+        return out
     }
 
     public func translated(by d: Point) -> Element {

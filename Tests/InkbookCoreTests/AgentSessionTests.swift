@@ -121,6 +121,27 @@ final class AgentSessionTests: XCTestCase {
         XCTAssertTrue(transport.requests.isEmpty)
     }
 
+    func testFallbackOnlyForModelsThatSupportIt() async throws {
+        for (model, expectsFallback) in [("claude-sonnet-5-5", true), ("claude-haiku-5-5", false)] {
+            let transport = ScriptedTransport([assistant([["type": "text", "text": "ok"]], stop: "end_turn")])
+            let host = FakeHost(notebook())
+            _ = try await AgentSession(transport: transport, host: host,
+                                       configuration: AgentConfiguration(model: model, effort: "medium")).send("x")
+            XCTAssertEqual(transport.requests.first?["fallbacks"] != nil, expectsFallback, model)
+            XCTAssertEqual(transport.requests.first?["model"]?.string, model)
+        }
+    }
+
+    func testHTTPErrorsKeepTheAPIMessage() {
+        let body: JSONValue = ["type": "error", "error": ["type": "authentication_error", "message": "invalid x-api-key"]]
+        XCTAssertEqual(AnthropicHTTPTransport.error(status: 401, body: body, retryAfter: nil), .authentication("invalid x-api-key"))
+        XCTAssertTrue(AgentAPIError.authentication("invalid x-api-key").description.contains("invalid x-api-key"))
+        let notFound: JSONValue = ["error": ["message": "model: claude-sonnet-5.5"]]
+        XCTAssertEqual(AnthropicHTTPTransport.error(status: 404, body: notFound, retryAfter: nil), .invalidRequest("model: claude-sonnet-5.5"))
+        XCTAssertEqual(AnthropicHTTPTransport.error(status: 429, body: nil, retryAfter: "12"), .rateLimited(retryAfter: 12))
+        XCTAssertNil(AnthropicHTTPTransport.error(status: 200, body: nil, retryAfter: nil))
+    }
+
     func testJSONValueRoundTripsTypes() throws {
         let v: JSONValue = ["a": 1, "b": 1.5, "c": true, "d": .null, "e": ["x", 2]]
         XCTAssertEqual(try JSONValue.decode(try v.encoded()), v)

@@ -18,7 +18,7 @@ opacity and blend modes) — plus an **optional, approval-gated agent** you can 
 | Path | What | Builds on |
 |---|---|---|
 | `Sources/InkbookCore/Model` | Notebook → Page → Layer (vector / raster / agent) → Element | any |
-| `Sources/InkbookCore/Storage` | `.inkbook` bundle: `manifest.json`, `raster/*.png`, `assets/*`; atomic writes, schema versioning | any |
+| `Sources/InkbookCore/Storage` | `.inkbook` bundle: `manifest.json`, `raster/*.png`, `assets/*`, `history/*`; atomic writes, schema versioning | any |
 | `Sources/InkbookCore/Brush` | Pressure curve, smoothing, raster dab spacing, vector eraser hit-testing | any |
 | `Sources/InkbookCore/Import/Goodnotes` | Protobuf wire reader, Apple LZ4, `tpl` decoder, importer + report | any |
 | `Sources/InkbookCore/Agent` | Tool definitions, approval protocol, Messages API client (raw HTTPS), tool-use loop | any |
@@ -77,7 +77,10 @@ in order.
 - iPad app: runs on device (sideloaded build). CI compiles it for the simulator and builds the IPA.
 - Drawing: pressure pens render as filled variable-width outlines. Committed ink is cached and only
   changed areas repaint; the live stroke is drawn on a separate overlay with predicted touches.
-- Lasso (vector and agent layers): select, drag to move, duplicate, delete.
+- Lasso across all visible, unlocked ink layers: select (half of an item inside, or its center
+  plus a fifth of it), drag to move, duplicate, delete.
+- Undo/redo history is saved in the notebook (`history/`, newest 100 steps, ≤150 MB), so it survives
+  closing the app.
 - PDF: import (one page per PDF page, as background) and export (vector PDF via the share sheet).
 - Handwriting recognition: on-device (Vision), a few seconds after you stop writing on a page; the
   transcript feeds the agent's `read_page`.

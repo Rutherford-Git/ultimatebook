@@ -28,11 +28,30 @@ final class GeometryFeatureTests: XCTestCase {
         XCTAssertTrue(Lasso.contains(square, Point(50, 50)))
         XCTAssertFalse(Lasso.contains(square, Point(150, 50)))
         let inside = Element.stroke(Stroke(brush: .pen, points: (0..<10).map { InkPoint(Point(10 + Double($0), 10)) }))
-        let poking = Element.stroke(Stroke(brush: .pen, points: (0..<10).map { InkPoint(Point(95 + Double($0), 50)) }))
+        // Mostly outside (25% inside) with its center outside: not selected.
+        let poking = Element.stroke(Stroke(brush: .pen, points: (0..<41).map { InkPoint(Point(90 + Double($0), 50)) }))
         let note = Element.text(TextBox(frame: Rect(x: 20, y: 20, width: 30, height: 30), text: "x"))
         let outside = Element.highlight(HighlightRegion(frame: Rect(x: 200, y: 200, width: 10, height: 10)))
         XCTAssertEqual(Set(Lasso.select(square, in: [inside, poking, note, outside])), [inside.id, note.id])
         XCTAssertEqual(Lasso.bounds(of: [note.id], in: [inside, note]), Rect(x: 20, y: 20, width: 30, height: 30))
+    }
+
+    func testLassoSelectsHighlighterOverhangingTheLassoedWords() {
+        let lasso = [Point(20, 20), Point(120, 20), Point(120, 60), Point(20, 60)]
+        // Highlight runs 35% past the lasso on the right, but its center is inside.
+        let highlight = Element.stroke(Stroke(brush: .highlighter, points: [InkPoint(Point(30, 40)), InkPoint(Point(165, 40))]))
+        // Slowly written start (many samples clustered inside) must not make a mostly-outside stroke count.
+        let clustered = Element.stroke(Stroke(brush: .pen, points: (0..<50).map { _ in InkPoint(Point(110, 40)) }
+            + [InkPoint(Point(300, 40))]))
+        XCTAssertEqual(Lasso.select(lasso, in: [highlight, clustered]), [highlight.id])
+    }
+
+    func testSelfCrossingLassoCountsBothLoops() {
+        // Figure-eight: left loop around (25, 25), right loop around (75, 25).
+        let eight = [Point(0, 0), Point(100, 50), Point(100, 0), Point(0, 50)]
+        XCTAssertTrue(Lasso.contains(eight, Point(10, 25)))
+        XCTAssertTrue(Lasso.contains(eight, Point(90, 25)))
+        XCTAssertFalse(Lasso.contains(eight, Point(50, 45)))
     }
 
     func testElementTranslateAndDuplicate() {

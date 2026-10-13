@@ -17,6 +17,16 @@ public struct AgentConfiguration: Equatable, Sendable {
     }
 
     public static let `default` = AgentConfiguration()
+
+    /// Models offered in settings (current generation), default first.
+    public static let knownModels = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"]
+
+    /// Server-side refusal fallback (`fallbacks: "default"`) is only accepted by these models;
+    /// sending it to others (e.g. Haiku 5.5) is rejected.
+    public static let refusalFallbackModels: Set<String> = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-opus-5"]
+
+    /// Whether requests include the refusal fallback for this configuration.
+    public var sendsRefusalFallback: Bool { refusalFallback && Self.refusalFallbackModels.contains(model) }
 }
 
 /// Outcome of one user message.
@@ -113,7 +123,7 @@ public actor AgentSession {
             // Caches tools + system + history prefix across the loop's round trips.
             "cache_control": ["type": "ephemeral"],
         ]
-        if configuration.refusalFallback { body["fallbacks"] = "default" }
+        if configuration.sendsRefusalFallback { body["fallbacks"] = "default" }
         return .object(body)
     }
 

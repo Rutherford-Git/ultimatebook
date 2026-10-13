@@ -55,22 +55,26 @@ final class DocumentModel: ObservableObject {
     private var pendingDirty: CGRect? = .null
 
     private var bitmaps: [UUID: RasterLayerBitmap] = [:]
-    private var undoStack: [Snapshot] = []
-    private var redoStack: [Snapshot] = []
+    /// Undo/redo history, persisted in the bundle so it survives closing the app.
+    private let history: HistoryStore
+    private var undoStack: [HistoryEntry] = []
+    private var redoStack: [HistoryEntry] = []
+    /// History entries (and raster snapshots) not yet written to disk.
+    private var unsavedEntries: Set<UUID> = []
+    private var pendingRasters: [UUID: CGImage] = [:]
+    private var encodingRasters: Set<UUID> = []
     private var approvalContinuation: CheckedContinuation<ApprovalDecision, Never>?
     private var saveTask: Task<Void, Never>?
     private var recognitionTask: Task<Void, Never>?
     private var pagesNeedingRecognition: Set<UUID> = []
 
-    private struct Snapshot {
-        var notebook: Notebook
-        var raster: (UUID, CGImage?)?
-    }
-
     init(store: NotebookStore) throws {
         self.store = store
         notebook = try store.load()
+        history = HistoryStore(bundle: store.url)
+        (undoStack, redoStack) = history.load()
         activeLayerID = notebook.pages.first.flatMap(Self.defaultLayer)?.id
+        updateUndoState()
     }
 
     var page: Page { notebook.pages[pageIndex] }
@@ -109,12 +113,27 @@ final class DocumentModel: ObservableObject {
         return out
     }
 
-    /// Records state before an edit so it can be undone.
-    func beginEdit(rasterLayer: UUID? = nil) {
-        undoStack.append(Snapshot(notebook: notebook, raster: rasterLayer.map { ($0, bitmaps[$0]?.snapshot()) }))
-        if undoStack.count > 100 { undoStack.removeFirst() }
+    /// Records a page's state before an edit so it can be undone (default: the current page).
+    /// With `rasterLayer`, that layer's bitmap is captured too.
+    func beginEdit(rasterLayer: UUID? = nil, pageID: UUID? = nil) {
+        guard let target = notebook.pages.first(where: { $0.id == (pageID ?? page.id) }) else { return }
+        record(HistoryEntry(change: .page(target), rasterLayer: rasterLayer))
+    }
+
+    private func record(_ entry: HistoryEntry) {
+        if let layerID = entry.rasterLayer, let image = rasterSnapshot(layerID) { pendingRasters[entry.id] = image }
+        undoStack.append(entry)
+        unsavedEntries.insert(entry.id)
         redoStack.removeAll()
         updateUndoState()
+    }
+
+    /// Current bitmap of a raster layer, loading it first so a never-painted-this-session layer
+    /// is captured with its saved content (not as blank, which undo would then restore).
+    private func rasterSnapshot(_ layerID: UUID) -> CGImage? {
+        guard let page = notebook.pages.first(where: { $0.layers.contains { $0.id == layerID } }),
+              let layer = page.layers.first(where: { $0.id == layerID }) else { return nil }
+        return bitmap(for: layer, on: page)?.snapshot()
     }
 
     /// Applies a change. `dirty` is the changed area of the current page (nil = everything);
@@ -153,29 +172,48 @@ final class DocumentModel: ObservableObject {
     }
 
     func undo() {
-        guard let snap = undoStack.popLast() else { return }
-        redoStack.append(currentState(matching: snap))
-        restore(snap)
+        guard let entry = undoStack.popLast() else { return }
+        if let inverse = applyHistory(entry) { redoStack.append(inverse) }
+        historyChanged()
     }
 
     func redo() {
-        guard let snap = redoStack.popLast() else { return }
-        undoStack.append(currentState(matching: snap))
-        restore(snap)
+        guard let entry = redoStack.popLast() else { return }
+        if let inverse = applyHistory(entry) { undoStack.append(inverse) }
+        historyChanged()
     }
 
-    /// Current state, capturing the same raster layer as `snap` so the two can be swapped.
-    private func currentState(matching snap: Snapshot) -> Snapshot {
-        Snapshot(notebook: notebook, raster: snap.raster.map { ($0.0, bitmaps[$0.0]?.snapshot()) })
-    }
-
-    private func restore(_ snap: Snapshot) {
-        notebook = snap.notebook
-        if let (id, image) = snap.raster { bitmaps[id]?.restore(image) }
+    /// Applies a history entry and returns its inverse (nil if it no longer applies).
+    private func applyHistory(_ entry: HistoryEntry) -> HistoryEntry? {
+        let currentRaster = entry.rasterLayer.flatMap(rasterSnapshot)
+        guard let inverseChange = entry.change.apply(to: &notebook) else { return nil }
+        notebook.modified = Date()
+        let inverse = HistoryEntry(change: inverseChange, rasterLayer: entry.rasterLayer)
+        if let layerID = entry.rasterLayer {
+            if let image = savedRaster(for: entry), let page = notebook.pages.first(where: { $0.layers.contains { $0.id == layerID } }),
+               let layer = page.layers.first(where: { $0.id == layerID }) {
+                bitmap(for: layer, on: page)?.restore(image)
+            }
+            if let currentRaster { pendingRasters[inverse.id] = currentRaster }
+        }
+        pendingRasters[entry.id] = nil
+        unsavedEntries.remove(entry.id)
+        unsavedEntries.insert(inverse.id)
+        // Show where the change happened.
+        if let index = notebook.pages.firstIndex(where: { $0.id == entry.change.pageID }) { pageIndex = index }
         pageIndex = min(pageIndex, notebook.pages.count - 1)
+        pagesNeedingRecognition.insert(page.id)
+        return inverse
+    }
+
+    private func savedRaster(for entry: HistoryEntry) -> CGImage? {
+        if let image = pendingRasters[entry.id] { return image }
+        return history.rasterData(for: entry.id).flatMap { UIImage(data: $0)?.cgImage }
+    }
+
+    private func historyChanged() {
         selection = []
         ensureValidActiveLayer()
-        pagesNeedingRecognition.insert(page.id)
         updateUndoState()
         invalidate(nil)
         scheduleSave()
@@ -298,9 +336,9 @@ final class DocumentModel: ObservableObject {
     }
 
     func addPage(after index: Int? = nil) {
-        beginEdit()
-        let template = page
-        mutate { $0.pages.insert(Page(size: template.size, paper: template.paper), at: (index ?? self.pageIndex) + 1) }
+        let newPage = Page(size: page.size, paper: page.paper)
+        record(HistoryEntry(change: .removePage(newPage.id)))
+        mutate { $0.pages.insert(newPage, at: (index ?? self.pageIndex) + 1) }
         pageIndex = (index ?? pageIndex) + 1
         activeLayerID = page.layers.first?.id
     }
@@ -362,6 +400,37 @@ final class DocumentModel: ObservableObject {
         } catch {
             NSLog("Inkbook save failed: \(error.localizedDescription)")
         }
+        saveHistory()
+    }
+
+    /// Writes new history entries and the index; raster snapshots are PNG-encoded off the main
+    /// thread and released from memory once written.
+    private func saveHistory() {
+        let live = Set(undoStack.map(\.id) + redoStack.map(\.id))
+        for entry in undoStack + redoStack where unsavedEntries.contains(entry.id) {
+            do { try history.write(entry) } catch { NSLog("Inkbook history write failed: \(error.localizedDescription)") }
+        }
+        unsavedEntries.removeAll()
+        do {
+            let dropped = Set(try history.saveIndex(undo: undoStack.map(\.id), redo: redoStack.map(\.id)))
+            if !dropped.isEmpty { undoStack.removeAll { dropped.contains($0.id) }; updateUndoState() }
+        } catch {
+            NSLog("Inkbook history index failed: \(error.localizedDescription)")
+        }
+        pendingRasters = pendingRasters.filter { live.contains($0.key) }
+        let history = history
+        for (id, image) in pendingRasters where !encodingRasters.contains(id) {
+            encodingRasters.insert(id)
+            Task.detached(priority: .utility) { [weak self] in
+                if let png = UIImage(cgImage: image).pngData() { try? history.writeRaster(png, for: id) }
+                await self?.rasterWritten(id)
+            }
+        }
+    }
+
+    private func rasterWritten(_ id: UUID) {
+        encodingRasters.remove(id)
+        pendingRasters[id] = nil
     }
 
     /// Writes the notebook as a PDF to a temporary file for sharing.
@@ -413,7 +482,8 @@ extension DocumentModel: AgentNotebookHost {
     func snapshot() async -> Notebook { notebook }
 
     func apply(_ proposal: AgentProposal) async throws {
-        beginEdit()
+        guard notebook.pages.indices.contains(proposal.pageIndex) else { throw AgentToolError.noSuchPage(proposal.pageIndex + 1) }
+        beginEdit(pageID: notebook.pages[proposal.pageIndex].id)
         var copy = notebook
         try proposal.apply(to: &copy)
         mutate { $0 = copy }
