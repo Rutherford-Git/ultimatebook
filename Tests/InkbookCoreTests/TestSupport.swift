@@ -74,6 +74,7 @@ final class FakeHost: AgentNotebookHost, @unchecked Sendable {
     var decisions: [ApprovalDecision]
     private(set) var asked: [AgentProposal] = []
     var png: Data? = Data([0x89, 0x50, 0x4E, 0x47])
+    var diagnostics: String?
 
     init(_ notebook: Notebook, decisions: [ApprovalDecision] = []) {
         self.notebook = notebook; self.decisions = decisions
@@ -86,6 +87,7 @@ final class FakeHost: AgentNotebookHost, @unchecked Sendable {
         asked.append(proposal)
         return decisions.isEmpty ? .reject(reason: nil) : decisions.removeFirst()
     }
+    func diagnosticsReport() async -> String? { diagnostics }
 }
 
 func assistant(_ content: [JSONValue], stop: String, extra: [String: JSONValue] = [:]) -> JSONValue {

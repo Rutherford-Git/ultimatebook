@@ -3,7 +3,19 @@ import InkbookCore
 
 enum LibrarySection: String, Hashable, CaseIterable {
     case all = "Notebooks", favorites = "Favorites"
-    var symbol: String { self == .all ? "books.vertical" : "star" }
+    case notes = "Improvement notes", diagnostics = "Diagnostics"
+
+    var symbol: String {
+        switch self {
+        case .all: "books.vertical"
+        case .favorites: "star"
+        case .notes: "list.bullet.clipboard"
+        case .diagnostics: "stethoscope"
+        }
+    }
+
+    static let library: [LibrarySection] = [.all, .favorites]
+    static let app: [LibrarySection] = [.notes, .diagnostics]
 }
 
 struct LibraryView: View {
@@ -27,8 +39,13 @@ struct LibraryView: View {
     var body: some View {
         NavigationSplitView {
             List(selection: $section) {
-                ForEach(LibrarySection.allCases, id: \.self) { s in
+                ForEach(LibrarySection.library, id: \.self) { s in
                     Label(s.rawValue, systemImage: s.symbol).tag(s)
+                }
+                Section("App") {
+                    ForEach(LibrarySection.app, id: \.self) { s in
+                        Label(s.rawValue, systemImage: s.symbol).tag(s)
+                    }
                 }
             }
             .navigationTitle("Inkbook")
@@ -40,20 +57,10 @@ struct LibraryView: View {
                 .padding()
             }
         } detail: {
-            ScrollView {
-                if visible.isEmpty { emptyState } else { grid }
-            }
-            .background(Color(Theme.backdrop))
-            .navigationTitle(section?.rawValue ?? "Notebooks")
-            .searchable(text: $search, prompt: "Search notebooks")
-            .toolbar {
-                ToolbarItemGroup(placement: .primaryAction) {
-                    if library.isImporting { ProgressView() }
-                    Button { importing = true } label: { Label("Import", systemImage: "square.and.arrow.down") }
-                    Button { showNew = true } label: { Label("New", systemImage: "plus").labelStyle(.titleAndIcon) }
-                        .buttonStyle(.borderedProminent)
-                        .buttonBorderShape(.capsule)
-                }
+            switch section {
+            case .notes?: ImprovementNotesView()
+            case .diagnostics?: DiagnosticsView()
+            default: notebooks
             }
         }
         .tint(Theme.accent)
@@ -87,6 +94,24 @@ struct LibraryView: View {
         } message: { Text(library.errorMessage ?? "") }
         .fullScreenCover(item: $open) { item in
             NotebookScreen(url: item.url).onDisappear { library.reload() }
+        }
+    }
+
+    private var notebooks: some View {
+        ScrollView {
+            if visible.isEmpty { emptyState } else { grid }
+        }
+        .background(Color(Theme.backdrop))
+        .navigationTitle(section?.rawValue ?? "Notebooks")
+        .searchable(text: $search, prompt: "Search notebooks")
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                if library.isImporting { ProgressView() }
+                Button { importing = true } label: { Label("Import", systemImage: "square.and.arrow.down") }
+                Button { showNew = true } label: { Label("New", systemImage: "plus").labelStyle(.titleAndIcon) }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.capsule)
+            }
         }
     }
 

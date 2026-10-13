@@ -20,6 +20,9 @@ struct NotebookView: View {
     @State private var exported: ExportedFile?
     @State private var exportError: String?
     @State private var renaming = false
+    @State private var showQuickNote = false
+    @State private var showDiagnostics = false
+    @AppStorage("diag.hud") private var hud = false
     @State private var newTitle = ""
 
     private var brushTool: Tool { Tool(rawValue: lastBrush).flatMap { $0.isRaster ? $0 : nil } ?? .pencil }
@@ -30,6 +33,9 @@ struct NotebookView: View {
             .background(Color(Theme.backdrop).ignoresSafeArea())
             .safeAreaInset(edge: .top, spacing: 0) { topBar }
             .overlay(alignment: .trailing) { presetRail }
+            .overlay(alignment: .topLeading) {
+                if hud { InkHUD(elementCount: document.page.layers.reduce(0) { $0 + $1.elements.count }).padding(12) }
+            }
             .overlay(alignment: .bottom) {
                 VStack(spacing: 10) {
                     if !document.selection.isEmpty { selectionBar.transition(.move(edge: .bottom).combined(with: .opacity)) }
@@ -45,6 +51,16 @@ struct NotebookView: View {
             .sheet(isPresented: $showAgent) { AgentPanel(document: document, chat: chat).presentationDetents([.medium, .large]) }
             .sheet(isPresented: $showAgentSettings) { AgentSettingsView() }
             .sheet(item: $exported) { ShareSheet(items: [$0.url]) }
+            .sheet(isPresented: $showQuickNote) {
+                QuickNoteSheet(context: "\(document.notebook.title), page \(document.pageIndex + 1)")
+            }
+            .sheet(isPresented: $showDiagnostics) {
+                NavigationStack {
+                    DiagnosticsView().toolbar {
+                        ToolbarItem(placement: .cancellationAction) { Button("Done") { showDiagnostics = false } }
+                    }
+                }
+            }
             .alert("Rename notebook", isPresented: $renaming) {
                 TextField("Title", text: $newTitle)
                 Button("Rename") { document.rename(newTitle) }
@@ -54,7 +70,8 @@ struct NotebookView: View {
                 Button("OK") {}
             } message: { Text(exportError ?? "") }
             // Approvals show here only while no other sheet is up; the agent panel shows its own.
-            .approvalSheet(for: document, enabled: !showAgent && !showAgentSettings && !showLayers && !showPages)
+            .approvalSheet(for: document, enabled: !showAgent && !showAgentSettings && !showLayers && !showPages
+                           && !showQuickNote && !showDiagnostics)
     }
 
     // MARK: Top bar
@@ -85,9 +102,12 @@ struct NotebookView: View {
             Button { newTitle = document.notebook.title; renaming = true } label: { Label("Rename", systemImage: "pencil") }
             Button { showPages = true } label: { Label("Pages", systemImage: "square.grid.2x2") }
             Button {
-                document.saveNow()
+                document.saveNow(wait: true)
                 do { exported = ExportedFile(url: try document.exportPDF()) } catch { exportError = error.localizedDescription }
             } label: { Label("Export PDF", systemImage: "square.and.arrow.up") }
+            Divider()
+            Button { showQuickNote = true } label: { Label("Add improvement note…", systemImage: "list.bullet.clipboard") }
+            Button { showDiagnostics = true } label: { Label("Diagnostics", systemImage: "stethoscope") }
             Divider()
             Toggle(isOn: $document.pencilOnly) { Label("Draw with Apple Pencil only", systemImage: "applepencil") }
         } label: {

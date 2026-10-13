@@ -67,6 +67,11 @@ final class DocumentModel: ObservableObject {
     private var saveTask: Task<Void, Never>?
     private var recognitionTask: Task<Void, Never>?
     private var pagesNeedingRecognition: Set<UUID> = []
+    /// Last time the user touched the canvas; background work waits for a pause in writing.
+    private var lastInkActivity: CFTimeInterval = 0
+    /// Disk writes run in order on one serial queue, off the main thread: encoding a full page of
+    /// ink on the main thread caused a visible hitch when writing resumed after a short pause.
+    private static let saveQueue = DispatchQueue(label: "app.inkbook.save", qos: .utility)
 
     init(store: NotebookStore) throws {
         self.store = store
@@ -75,6 +80,15 @@ final class DocumentModel: ObservableObject {
         (undoStack, redoStack) = history.load()
         activeLayerID = notebook.pages.first.flatMap(Self.defaultLayer)?.id
         updateUndoState()
+        AppDiagnostics.log.info("notebook", "Opened \"\(notebook.title)\" (\(notebook.pages.count) pages, \(undoStack.count) undo steps)")
+    }
+
+    func noteInkActivity() { lastInkActivity = CACurrentMediaTime() }
+
+    /// Stops pending background saves and recognition (used for scratch notebooks).
+    func cancelBackgroundWork() {
+        saveTask?.cancel()
+        recognitionTask?.cancel()
     }
 
     var page: Page { notebook.pages[pageIndex] }
@@ -231,7 +245,11 @@ final class DocumentModel: ObservableObject {
         page.layers.last { $0.kind == .vector && !$0.isLocked } ?? page.layers.last { $0.kind != .agent } ?? page.layers.first
     }
 
-    private func updateUndoState() { canUndo = !undoStack.isEmpty; canRedo = !redoStack.isEmpty }
+    /// Assigns only on change: every assignment to a published property re-renders the screen.
+    private func updateUndoState() {
+        if canUndo == undoStack.isEmpty { canUndo = !undoStack.isEmpty }
+        if canRedo == redoStack.isEmpty { canRedo = !redoStack.isEmpty }
+    }
 
     /// Picks a tool and a matching target layer: raster tools need a raster layer (created on
     /// demand, Procreate-style); vector tools need a vector layer.
@@ -391,34 +409,52 @@ final class DocumentModel: ObservableObject {
         }
     }
 
-    func saveNow() {
-        do {
-            try store.save(notebook)
-            for (id, bitmap) in bitmaps where bitmap.isDirty {
-                if let png = bitmap.pngData() { try store.saveRaster(png, for: id); bitmap.markSaved() }
+    /// Snapshots the notebook and changed bitmaps on the main thread (cheap: value copies and
+    /// copy-on-write images), then encodes and writes them on the save queue.
+    /// `wait` blocks until everything queued so far is on disk (closing, exporting).
+    func saveNow(wait: Bool = false) {
+        let notebook = notebook, store = store, log = AppDiagnostics.log
+        var rasters: [(UUID, CGImage)] = []
+        for (id, bitmap) in bitmaps where bitmap.isDirty {
+            if let image = bitmap.image { rasters.append((id, image)); bitmap.markSaved() }
+        }
+        Self.saveQueue.async {
+            do { try store.save(notebook) } catch {
+                log.error("save", "Saving \"\(notebook.title)\" failed: \(error.localizedDescription)")
             }
-        } catch {
-            NSLog("Inkbook save failed: \(error.localizedDescription)")
+            for (id, image) in rasters {
+                do {
+                    guard let png = UIImage(cgImage: image).pngData() else { throw CocoaError(.fileWriteUnknown) }
+                    try store.saveRaster(png, for: id)
+                } catch {
+                    log.error("save", "Saving a paint layer failed: \(error.localizedDescription)")
+                }
+            }
         }
         saveHistory()
+        if wait { Self.saveQueue.sync {} }
     }
 
-    /// Writes new history entries and the index; raster snapshots are PNG-encoded off the main
-    /// thread and released from memory once written.
+    /// Writes new history entries and the index on the save queue; raster snapshots are
+    /// PNG-encoded off the main thread and released from memory once written.
     private func saveHistory() {
         let live = Set(undoStack.map(\.id) + redoStack.map(\.id))
-        for entry in undoStack + redoStack where unsavedEntries.contains(entry.id) {
-            do { try history.write(entry) } catch { NSLog("Inkbook history write failed: \(error.localizedDescription)") }
-        }
+        let entries = (undoStack + redoStack).filter { unsavedEntries.contains($0.id) }
         unsavedEntries.removeAll()
-        do {
-            let dropped = Set(try history.saveIndex(undo: undoStack.map(\.id), redo: redoStack.map(\.id)))
-            if !dropped.isEmpty { undoStack.removeAll { dropped.contains($0.id) }; updateUndoState() }
-        } catch {
-            NSLog("Inkbook history index failed: \(error.localizedDescription)")
+        let undoIDs = undoStack.map(\.id), redoIDs = redoStack.map(\.id)
+        let history = history, log = AppDiagnostics.log
+        Self.saveQueue.async { [weak self] in
+            for entry in entries {
+                do { try history.write(entry) } catch { log.error("history", "Writing an undo step failed: \(error.localizedDescription)") }
+            }
+            do {
+                let dropped = Set(try history.saveIndex(undo: undoIDs, redo: redoIDs))
+                if !dropped.isEmpty { Task { @MainActor in self?.dropHistory(dropped) } }
+            } catch {
+                log.error("history", "Writing the undo index failed: \(error.localizedDescription)")
+            }
         }
         pendingRasters = pendingRasters.filter { live.contains($0.key) }
-        let history = history
         for (id, image) in pendingRasters where !encodingRasters.contains(id) {
             encodingRasters.insert(id)
             Task.detached(priority: .utility) { [weak self] in
@@ -428,6 +464,12 @@ final class DocumentModel: ObservableObject {
         }
     }
 
+    /// Oldest steps trimmed by the history size limit.
+    private func dropHistory(_ ids: Set<UUID>) {
+        undoStack.removeAll { ids.contains($0.id) }
+        updateUndoState()
+    }
+
     private func rasterWritten(_ id: UUID) {
         encodingRasters.remove(id)
         pendingRasters[id] = nil
@@ -435,7 +477,8 @@ final class DocumentModel: ObservableObject {
 
     /// Saves everything and refreshes the first-page cover thumbnail when the notebook uses one.
     func close() {
-        saveNow()
+        saveNow(wait: true)
+        AppDiagnostics.log.info("notebook", "Closed \"\(notebook.title)\"")
         if notebook.cover == .firstPage, let first = notebook.pages.first,
            let png = renderer.image(of: first, rasters: rasterImages(for: first), maxPixels: 600).pngData() {
             try? store.saveThumbnail(png)
@@ -466,6 +509,8 @@ final class DocumentModel: ObservableObject {
         recognitionTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 2_500_000_000)
             guard !Task.isCancelled, let self else { return }
+            // Rendering a page for Vision takes a moment on the main thread: wait for a pause.
+            if CACurrentMediaTime() - self.lastInkActivity < 2 { self.scheduleRecognition(); return }
             let ids = self.pagesNeedingRecognition
             self.pagesNeedingRecognition.removeAll()
             for id in ids {
@@ -473,7 +518,7 @@ final class DocumentModel: ObservableObject {
                       let image = self.renderer.inkImage(of: page, maxPixels: 2400).cgImage else { continue }
                 let text: String
                 do { text = try await HandwritingRecognizer.transcript(of: image, pageSize: page.size) } catch {
-                    NSLog("Inkbook recognition failed: \(error.localizedDescription)")
+                    AppDiagnostics.log.warning("recognition", "Handwriting recognition failed: \(error.localizedDescription)")
                     continue
                 }
                 guard !Task.isCancelled, let index = self.notebook.pages.firstIndex(where: { $0.id == id }) else { continue }
@@ -509,6 +554,12 @@ extension DocumentModel: AgentNotebookHost {
         let page = notebook.pages[index]
         return renderer.png(of: page, rasters: rasterImages(for: page), maxPixels: maxPixels)
     }
+
+    func diagnosticsReport() async -> String? { AppDiagnostics.report() }
+
+    func improvementNotes() async -> String? { ImprovementNotesModel.shared.plainText }
+
+    func runSelfTest() async -> String? { await SelfTest.run() }
 
     func requestApproval(_ proposal: AgentProposal) async -> ApprovalDecision {
         // One proposal at a time: the agent loop runs tools sequentially.

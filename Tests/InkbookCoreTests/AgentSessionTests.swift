@@ -23,7 +23,7 @@ final class AgentSessionTests: XCTestCase {
         XCTAssertNil(body["thinking"])        // Opus 5.5: adaptive by default
         XCTAssertNil(body["tool_choice"])     // forced tool choice is rejected on this model
         let tools = try XCTUnwrap(body["tools"]?.array)
-        XCTAssertEqual(tools.compactMap { $0["name"]?.string }, ["list_pages", "read_page", "add_note", "add_highlight"])
+        XCTAssertEqual(tools.compactMap { $0["name"]?.string }, ["list_pages", "read_page", "add_note", "add_highlight", "read_diagnostics", "read_improvement_notes", "run_self_test"])
         for tool in tools {
             XCTAssertEqual(tool["strict"]?.bool, true)
             XCTAssertEqual(tool["input_schema"]?["additionalProperties"]?.bool, false)

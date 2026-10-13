@@ -48,6 +48,18 @@ public protocol AgentNotebookHost: AnyObject {
     func renderPage(_ index: Int, maxPixels: Int) async -> Data?
     /// Shows the proposal to the user and waits for their decision.
     func requestApproval(_ proposal: AgentProposal) async -> ApprovalDecision
+    /// App diagnostics (errors, warnings, performance), or nil when unavailable.
+    func diagnosticsReport() async -> String?
+    /// The user's improvement notes about the app, or nil when unavailable.
+    func improvementNotes() async -> String?
+    /// Runs the app's self-test on scratch data (never the open notebook) and returns its report.
+    func runSelfTest() async -> String?
+}
+
+public extension AgentNotebookHost {
+    func diagnosticsReport() async -> String? { nil }
+    func improvementNotes() async -> String? { nil }
+    func runSelfTest() async -> String? { nil }
 }
 
 public enum AgentToolError: Error, Equatable, CustomStringConvertible {
@@ -122,6 +134,15 @@ public enum NotebookTools {
              ["page": page, "x": number("Left edge in page points"), "y": number("Top edge in page points"),
               "width": number("Width in page points"), "height": number("Height in page points"),
               "color": ["type": "string", "enum": ["yellow", "green", "pink", "blue"]]]),
+        tool("read_diagnostics",
+             "Read Inkbook's own diagnostics log: recent errors and warnings (save, import, agent, recognition, crashes from earlier sessions) and ink performance timings. Use when the user asks about bugs, crashes or lag in the app itself.",
+             [:]),
+        tool("read_improvement_notes",
+             "Read the user's improvement notes about the Inkbook app (bugs, performance, ideas, design), open ones first.",
+             [:]),
+        tool("run_self_test",
+             "Run Inkbook's built-in self-test on scratch data (never touches the user's notebooks): an ink rendering benchmark at increasing stroke counts plus save, undo, lasso and export checks. Returns pass/fail lines and timings. Takes a few seconds.",
+             [:]),
     ]
 
     public static func run(_ name: String, input: JSONValue, host: AgentNotebookHost) async -> ToolOutput {
@@ -130,6 +151,9 @@ public enum NotebookTools {
             case "list_pages": return ToolOutput(text: listPages(await host.snapshot()))
             case "read_page": return try await readPage(input, host: host)
             case "add_note", "add_highlight": return try await propose(name, input, host: host)
+            case "read_diagnostics": return ToolOutput(text: await host.diagnosticsReport() ?? "Diagnostics are not available.")
+            case "read_improvement_notes": return ToolOutput(text: await host.improvementNotes() ?? "Improvement notes are not available.")
+            case "run_self_test": return ToolOutput(text: await host.runSelfTest() ?? "Self-test is not available.")
             default: throw AgentToolError.unknownTool(name)
             }
         } catch {

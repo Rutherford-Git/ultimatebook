@@ -53,7 +53,10 @@ public actor AgentSession {
     on a separate Agent layer they can hide or delete. Handwriting transcripts are machine-recognized \
     and often wrong on math and diagrams; request the page image when accuracy matters. Prefer few, \
     well-placed annotations in empty space near the content they refer to. If a request is ambiguous, \
-    answer in chat instead of annotating.
+    answer in chat instead of annotating. The user is also testing the Inkbook app itself: \
+    read_diagnostics, read_improvement_notes and run_self_test let you review its errors, performance \
+    and the user's improvement notes. When reviewing them, be concrete: name the failing check or \
+    error, the likely cause, and the next fix to try.
     """
 
     private let transport: MessagesTransport

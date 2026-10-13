@@ -16,10 +16,7 @@ struct AgentPanel: View {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
                             ForEach(chat.lines) { line in
-                                Text(line.text)
-                                    .padding(10)
-                                    .background(line.fromUser ? Color.accentColor.opacity(0.15) : Color(.secondarySystemBackground),
-                                                in: RoundedRectangle(cornerRadius: 10))
+                                MessageBubble(line: line)
                                     .frame(maxWidth: .infinity, alignment: line.fromUser ? .trailing : .leading)
                                     .id(line.id)
                             }
@@ -33,7 +30,13 @@ struct AgentPanel: View {
                 HStack {
                     TextField("Ask about this notebook…", text: $input, axis: .vertical)
                         .textFieldStyle(.roundedBorder)
-                        .lineLimit(1...4)
+                        .lineLimit(1...8)
+                    // Explicit paste: long-press paste is easy to miss in a sheet over the canvas.
+                    PasteButton(payloadType: String.self) { strings in
+                        input += (input.isEmpty ? "" : "\n") + strings.joined(separator: "\n")
+                    }
+                    .labelStyle(.iconOnly)
+                    .buttonBorderShape(.circle)
                     Button {
                         let text = input; input = ""
                         Task { await chat.send(text, host: document) }
@@ -44,6 +47,20 @@ struct AgentPanel: View {
             }
             .navigationTitle("Agent")
             .toolbar {
+                Menu {
+                    Button("Copy conversation", systemImage: "doc.on.doc") { UIPasteboard.general.string = chat.transcript }
+                    Button("Copy last reply", systemImage: "text.bubble") {
+                        UIPasteboard.general.string = chat.lines.last { !$0.fromUser }?.text
+                    }
+                    .disabled(!chat.lines.contains { !$0.fromUser })
+                    Button("Save last reply as improvement note", systemImage: "list.bullet.clipboard") {
+                        if let reply = chat.lines.last(where: { !$0.fromUser }) {
+                            ImprovementNotesModel.shared.add(reply.text, category: .idea, context: "Agent reply")
+                        }
+                    }
+                    .disabled(!chat.lines.contains { !$0.fromUser })
+                } label: { Image(systemName: "doc.on.doc") }
+                .disabled(chat.lines.isEmpty)
                 Button { chat.reset() } label: { Image(systemName: "arrow.counterclockwise") }
                 Button { showSettings = true } label: { Image(systemName: "gearshape") }
             }
@@ -67,6 +84,10 @@ final class AgentChatModel: ObservableObject {
     func reset() {
         lines.removeAll()
         session = nil
+    }
+
+    var transcript: String {
+        lines.map { ($0.fromUser ? "You: " : "Agent: ") + $0.text }.joined(separator: "\n\n")
     }
 
     func send(_ text: String, host: DocumentModel) async {
@@ -97,6 +118,7 @@ final class AgentChatModel: ObservableObject {
             lines.append(Line(text: message, fromUser: false))
         } catch {
             lines.append(Line(text: "\(error)", fromUser: false))
+            AppDiagnostics.log.error("agent", "\(config.model): \(error)")
         }
     }
 }
@@ -176,5 +198,19 @@ struct AgentSettingsView: View {
         } catch {
             status = (false, "\(error)")
         }
+    }
+}
+
+/// One chat message. Long-press copies it (system text selection menu); the toolbar's copy menu
+/// copies the whole conversation or saves a reply as an improvement note.
+private struct MessageBubble: View {
+    let line: AgentChatModel.Line
+
+    var body: some View {
+        Text(line.text)
+            .textSelection(.enabled)
+            .padding(10)
+            .background(line.fromUser ? Color.accentColor.opacity(0.15) : Color(.secondarySystemBackground),
+                        in: RoundedRectangle(cornerRadius: 10))
     }
 }

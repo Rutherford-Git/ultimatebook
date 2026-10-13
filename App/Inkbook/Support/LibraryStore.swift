@@ -19,7 +19,9 @@ final class LibraryStore: ObservableObject {
 
     @Published private(set) var entries: [Entry] = []
     @Published var lastImportReport: ImportReport?
-    @Published var errorMessage: String?
+    @Published var errorMessage: String? {
+        didSet { if let errorMessage { AppDiagnostics.log.error("library", errorMessage) } }
+    }
     @Published private(set) var isImporting = false
 
     let root: URL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -133,6 +135,8 @@ final class LibraryStore: ObservableObject {
             for (name, data) in result.assets { try store.saveAsset(data, named: name) }
             Self.renderThumbnail(notebook, store: store)
             lastImportReport = result.report
+            AppDiagnostics.log.log(result.report.warnings.isEmpty ? .info : .warning, "import",
+                                   "Imported \"\(notebook.title)\" from Goodnotes. \(result.report)")
             reload()
         } catch {
             errorMessage = "Import failed: \(error)"
