@@ -433,6 +433,21 @@ final class DocumentModel: ObservableObject {
         pendingRasters[id] = nil
     }
 
+    /// Saves everything and refreshes the first-page cover thumbnail when the notebook uses one.
+    func close() {
+        saveNow()
+        if notebook.cover == .firstPage, let first = notebook.pages.first,
+           let png = renderer.image(of: first, rasters: rasterImages(for: first), maxPixels: 600).pngData() {
+            try? store.saveThumbnail(png)
+        }
+    }
+
+    func rename(_ title: String) {
+        let t = title.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty else { return }
+        mutate { $0.title = t }
+    }
+
     /// Writes the notebook as a PDF to a temporary file for sharing.
     func exportPDF() throws -> URL {
         let data = renderer.pdfData(of: notebook) { self.rasterImages(for: $0) }

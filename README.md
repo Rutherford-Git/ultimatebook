@@ -13,6 +13,13 @@ opacity and blend modes) — plus an **optional, approval-gated agent** you can 
   PDF/image backgrounds and handwriting transcripts. Anything not converted is listed in the import
   report. Format notes: [docs/GOODNOTES_FORMAT.md](docs/GOODNOTES_FORMAT.md).
 
+## Design
+
+Minimal by default: a centered tool capsule (pen, highlighter, brush, eraser, lasso), a floating
+preset rail for the current tool (tap the active tool or preset again for color and size), and a page
+pill that opens a thumbnail grid. The library is a cover grid with search and favorites; a new
+notebook is one sheet (title, cover, paper).
+
 ## Layout
 
 | Path | What | Builds on |

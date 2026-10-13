@@ -105,3 +105,34 @@ final class BrushEngineTests: XCTestCase {
         XCTAssertEqual(BrushEngine.strokesHit(by: Point(3, 0), radius: 2, in: [.stroke(near), .stroke(far)]), [near.id])
     }
 }
+
+final class LibraryMetadataTests: XCTestCase {
+    func testNotebooksFromEarlierBuildsDecodeWithDefaultCoverAndFavorite() throws {
+        let legacy = #"{"id":"6E2DE9D3-6604-5E29-B659-5479A3B60245","title":"Old","created":"2026-10-01T00:00:00Z","modified":"2026-10-02T00:00:00Z","pages":[]}"#
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let nb = try decoder.decode(Notebook.self, from: Data(legacy.utf8))
+        XCTAssertEqual(nb.cover, .color(0))
+        XCTAssertFalse(nb.isFavorite)
+    }
+
+    func testInfoIsWrittenOnSaveAndRebuiltWhenMissing() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("info-\(UUID().uuidString).inkbook")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // Whole-second dates: the manifest stores ISO-8601 timestamps without fractions.
+        let t = Date(timeIntervalSince1970: 1_800_000_000)
+        var nb = Notebook(title: "Physics", pages: [Page(), Page()], cover: .color(3), isFavorite: true, created: t, modified: t)
+        let store = try NotebookStore.create(at: dir, notebook: nb)
+        XCTAssertEqual(try store.loadInfo(), nb.info)
+        XCTAssertEqual(try store.loadInfo().pageCount, 2)
+
+        try FileManager.default.removeItem(at: dir.appendingPathComponent("info.json"))
+        nb.title = "Physics"   // unchanged; summary is rebuilt from the manifest
+        XCTAssertEqual(try store.loadInfo(), nb.info)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.appendingPathComponent("info.json").path))
+
+        XCTAssertNil(store.thumbnail())
+        try store.saveThumbnail(Data([9]))
+        XCTAssertEqual(store.thumbnail(), Data([9]))
+    }
+}

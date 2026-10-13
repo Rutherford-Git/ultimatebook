@@ -10,7 +10,7 @@ struct CanvasView: UIViewRepresentable {
         let scroll = UIScrollView()
         scroll.minimumZoomScale = 0.5
         scroll.maximumZoomScale = 6
-        scroll.backgroundColor = .systemGray5
+        scroll.backgroundColor = Theme.backdrop
         scroll.delaysContentTouches = false   // Pencil strokes start without the scroll view's delay
         scroll.delegate = context.coordinator
         scroll.panGestureRecognizer.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]

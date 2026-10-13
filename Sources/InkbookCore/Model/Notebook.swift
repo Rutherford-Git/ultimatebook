@@ -315,6 +315,16 @@ public struct Page: Codable, Hashable, Sendable, Identifiable {
     }
 }
 
+/// How a notebook's cover looks in the library.
+public enum NotebookCover: Codable, Hashable, Sendable {
+    /// Solid cloth-style cover in one of the app's cover colors (index into the palette).
+    case color(Int)
+    /// A thumbnail of the first page (imported PDFs and Goodnotes notebooks).
+    case firstPage
+
+    public static let paletteCount = 8
+}
+
 public struct Notebook: Codable, Hashable, Sendable, Identifiable {
     public static let schemaVersion = 1
 
@@ -323,10 +333,44 @@ public struct Notebook: Codable, Hashable, Sendable, Identifiable {
     public var created: Date
     public var modified: Date
     public var pages: [Page]
+    public var cover: NotebookCover
+    public var isFavorite: Bool
 
-    public init(id: UUID = UUID(), title: String, pages: [Page] = [Page()],
-                created: Date = Date(), modified: Date = Date()) {
+    public init(id: UUID = UUID(), title: String, pages: [Page] = [Page()], cover: NotebookCover = .color(0),
+                isFavorite: Bool = false, created: Date = Date(), modified: Date = Date()) {
         self.id = id; self.title = title; self.pages = pages
+        self.cover = cover; self.isFavorite = isFavorite
         self.created = created; self.modified = modified
     }
+
+    private enum CodingKeys: String, CodingKey { case id, title, created, modified, pages, cover, isFavorite }
+
+    /// Fields added after schema 1 shipped (`cover`, `isFavorite`) decode with defaults, so
+    /// notebooks saved by earlier builds still open.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        created = try c.decode(Date.self, forKey: .created)
+        modified = try c.decode(Date.self, forKey: .modified)
+        pages = try c.decode([Page].self, forKey: .pages)
+        cover = try c.decodeIfPresent(NotebookCover.self, forKey: .cover) ?? .color(0)
+        isFavorite = try c.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false
+    }
+
+    /// The small summary the library shows, without the pages.
+    public var info: NotebookInfo {
+        NotebookInfo(id: id, title: title, modified: modified, cover: cover, isFavorite: isFavorite, pageCount: pages.count)
+    }
+}
+
+/// Library summary of a notebook, stored as `info.json` next to the manifest so the library
+/// does not decode every notebook's full content to list it.
+public struct NotebookInfo: Codable, Hashable, Sendable {
+    public var id: UUID
+    public var title: String
+    public var modified: Date
+    public var cover: NotebookCover
+    public var isFavorite: Bool
+    public var pageCount: Int
 }

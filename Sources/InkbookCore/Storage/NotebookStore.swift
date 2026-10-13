@@ -73,7 +73,27 @@ public struct NotebookStore: Sendable {
     public func save(_ notebook: Notebook) throws {
         let data = try Self.encoder.encode(Manifest(schemaVersion: Notebook.schemaVersion, notebook: notebook))
         try Self.atomicWrite(data, to: manifestURL)
+        try Self.atomicWrite(try Self.encoder.encode(notebook.info), to: infoURL)
     }
+
+    private var infoURL: URL { url.appendingPathComponent("info.json") }
+    private var thumbnailURL: URL { url.appendingPathComponent("thumbnail.png") }
+
+    /// Library summary. Falls back to the full manifest for bundles saved before `info.json`
+    /// existed (and writes the summary so the next listing is fast).
+    public func loadInfo() throws -> NotebookInfo {
+        if let data = try? Data(contentsOf: infoURL), let info = try? Self.decoder.decode(NotebookInfo.self, from: data) {
+            return info
+        }
+        let info = try load().info
+        try? Self.atomicWrite(try Self.encoder.encode(info), to: infoURL)
+        return info
+    }
+
+    /// First-page thumbnail used as a cover (rendered by the app).
+    public func thumbnail() -> Data? { try? Data(contentsOf: thumbnailURL) }
+
+    public func saveThumbnail(_ png: Data) throws { try Self.atomicWrite(png, to: thumbnailURL) }
 
     // MARK: Raster layers and assets
 
