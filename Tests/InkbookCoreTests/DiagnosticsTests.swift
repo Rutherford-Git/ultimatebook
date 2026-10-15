@@ -123,3 +123,54 @@ final class DiagnosticsTests: XCTestCase {
         XCTAssertEqual(Array(names.suffix(3)), ["read_diagnostics", "read_improvement_notes", "run_self_test"])
     }
 }
+
+final class SearchAndBrushTests: XCTestCase {
+    func testSearchFindsHandwritingTextBoxesAndPDFText() throws {
+        var hand = Page(recognizedText: "Newton's second law\nF = ma")
+        hand.layers[0].elements.append(.text(TextBox(frame: Rect(x: 0, y: 0, width: 100, height: 40), text: "Lecture 4")))
+        let pdf = Page(paper: .asset("document.pdf", pdfPage: 0), backgroundText: "Thermodynamics: Énergie interne")
+        let index = SearchIndex(Notebook(title: "Physics", pages: [Page(), hand, pdf]))
+
+        XCTAssertEqual(index.hits(for: "newton").map(\.page), [1])
+        XCTAssertEqual(index.hits(for: "newton").first?.snippet, "Newton's second law")
+        XCTAssertEqual(index.hits(for: "lecture").map(\.page), [1])
+        XCTAssertEqual(index.hits(for: "energie").map(\.page), [2])   // accents ignored
+        XCTAssertTrue(index.hits(for: "  ").isEmpty)
+
+        let long = String(repeating: "word ", count: 60) + "needle" + String(repeating: " tail", count: 60)
+        let snippet = SearchIndex.snippet(in: long, matching: "needle")!
+        XCTAssertTrue(snippet.hasPrefix("…") && snippet.hasSuffix("…") && snippet.contains("needle"))
+        XCTAssertLessThanOrEqual(snippet.count, 82)
+    }
+
+    func testStoreWritesAndRebuildsSearchIndex() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).inkbook")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = try NotebookStore.create(at: url, notebook: Notebook(title: "T", pages: [Page(recognizedText: "alpha")]))
+        XCTAssertEqual(store.loadSearchIndex()?.pages, ["alpha"])
+        try FileManager.default.removeItem(at: url.appendingPathComponent("search.json"))
+        XCTAssertEqual(store.loadSearchIndex()?.hits(for: "ALPHA").count, 1)   // rebuilt from the manifest
+    }
+
+    func testPDFImportKeepsPageText() throws {
+        let nb = try PDFImport.notebook(title: "P", asset: "a.pdf", pages: [
+            .init(size: Size(600, 800), text: "  Chapter 1  "), .init(size: Size(600, 800), text: "   "),
+        ])
+        XCTAssertEqual(nb.pages.map(\.backgroundText), ["Chapter 1", nil])
+    }
+
+    func testBrushTuningDefaultsAndOldFilesDecode() throws {
+        XCTAssertEqual(Brush.pen.stabilization, 0.5)
+        XCTAssertFalse(Brush.highlighter.drawsStraight)
+        // Strokes saved before these fields existed still decode.
+        let old = #"{"kind":"pen","color":{"r":0,"g":0,"b":0,"a":1},"size":2,"minSizeRatio":0.35,"spacing":0.15,"softness":0}"#
+        let brush = try JSONDecoder().decode(Brush.self, from: Data(old.utf8))
+        XCTAssertNil(brush.smoothing)
+        var smooth = brush
+        smooth.smoothing = 0.8
+        var a = LiveStroke(brush: smooth, smoothing: smooth.stabilization)
+        var b = LiveStroke(brush: brush, smoothing: brush.stabilization)
+        for p in DiagnosticsTests.scribble(60) { a.add(p); b.add(p) }
+        XCTAssertNotEqual(a.finished(), b.finished())
+    }
+}

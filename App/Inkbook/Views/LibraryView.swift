@@ -29,6 +29,7 @@ struct LibraryView: View {
     @State private var openAfterSheet: OpenNotebook?
     @State private var renaming: LibraryStore.Entry?
     @State private var newTitle = ""
+    @State private var pageHits: [LibraryStore.PageHit] = []
 
     private var visible: [LibraryStore.Entry] {
         library.entries
@@ -93,26 +94,62 @@ struct LibraryView: View {
             Button("OK") {}
         } message: { Text(library.errorMessage ?? "") }
         .fullScreenCover(item: $open) { item in
-            NotebookScreen(url: item.url).onDisappear { library.reload() }
+            NotebookScreen(url: item.url, page: item.page).onDisappear { library.reload() }
         }
     }
 
     private var notebooks: some View {
         ScrollView {
-            if visible.isEmpty { emptyState } else { grid }
+            if visible.isEmpty && pageHits.isEmpty { emptyState } else {
+                if !visible.isEmpty { grid }
+                if !pageHits.isEmpty { pageResults }
+            }
         }
         .background(Color(Theme.backdrop))
         .navigationTitle(section?.rawValue ?? "Notebooks")
-        .searchable(text: $search, prompt: "Search notebooks")
+        .searchable(text: $search, prompt: "Search titles, handwriting and PDFs")
+        .task(id: search) {
+            // Debounced: search page text once typing pauses.
+            guard !search.trimmingCharacters(in: .whitespaces).isEmpty else { pageHits = []; return }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            let hits = await library.searchPages(search)
+            if !Task.isCancelled { pageHits = hits.filter { section != .favorites || $0.entry.info.isFavorite } }
+        }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 if library.isImporting { ProgressView() }
                 Button { importing = true } label: { Label("Import", systemImage: "square.and.arrow.down") }
+                    .help("Import a Goodnotes notebook or PDF")
                 Button { showNew = true } label: { Label("New", systemImage: "plus").labelStyle(.titleAndIcon) }
                     .buttonStyle(.borderedProminent)
                     .buttonBorderShape(.capsule)
             }
         }
+    }
+
+    /// Pages whose handwriting, typed text or PDF text matches the search.
+    private var pageResults: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("In pages").font(.headline).padding(.horizontal, 4)
+            ForEach(pageHits) { result in
+                Button { open = OpenNotebook(url: result.entry.url, page: result.hit.page) } label: {
+                    HStack(alignment: .top, spacing: 12) {
+                        Image(systemName: "doc.text.magnifyingglass").foregroundStyle(Theme.accent)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("\(result.entry.title) · page \(result.hit.page + 1)").font(.subheadline.weight(.semibold))
+                            Text(result.hit.snippet).font(.callout).foregroundStyle(.secondary).lineLimit(2)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(12)
+                    .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 32)
+        .padding(.bottom, 32)
     }
 
     private var grid: some View {
@@ -310,12 +347,15 @@ struct NewNotebookSheet: View {
 
 struct OpenNotebook: Identifiable {
     let url: URL
+    /// Page to show first (0-based), e.g. from a search result.
+    var page: Int?
     var id: URL { url }
 }
 
 /// Opens a notebook bundle and shows it, or an error if it cannot be read.
 struct NotebookScreen: View {
     let url: URL
+    var page: Int?
     @Environment(\.dismiss) private var dismiss
     @State private var document: DocumentModel?
     @State private var failure: String?
@@ -330,7 +370,11 @@ struct NotebookScreen: View {
             } else { ProgressView() }
         }
         .task {
-            do { document = try DocumentModel(store: NotebookStore(url: url)) } catch { failure = "\(error)" }
+            do {
+                let doc = try DocumentModel(store: NotebookStore(url: url))
+                if let page, doc.notebook.pages.indices.contains(page) { doc.pageIndex = page }
+                document = doc
+            } catch { failure = "\(error)" }
         }
     }
 }

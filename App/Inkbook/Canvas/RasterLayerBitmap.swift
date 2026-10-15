@@ -72,6 +72,7 @@ final class RasterLayerBitmap {
     }
 
     func markSaved() { isDirty = false }
+    func markUnsaved() { isDirty = true }
 
     /// Snapshot for undo.
     func snapshot() -> CGImage? { image }

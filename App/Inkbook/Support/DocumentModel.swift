@@ -1,3 +1,4 @@
+import PDFKit
 import UIKit
 import InkbookCore
 
@@ -51,6 +52,19 @@ final class DocumentModel: ObservableObject {
     @Published private(set) var selection: Set<UUID> = []
     /// Bumped on every content change; the canvas then redraws `takeDirtyRect()`.
     @Published private(set) var revision = 0
+
+    enum SaveState: Equatable {
+        case saved(Date)
+        /// Edits waiting for the next save.
+        case pending
+        /// The last save failed; another attempt is scheduled.
+        case failed(String)
+    }
+    /// Shown in the title menu, and as a notice while a save is failing.
+    @Published private(set) var saveState: SaveState = .saved(Date())
+    private var saveGeneration = 0
+    private var retryDelay: UInt64 = 2
+    private var retryTask: Task<Void, Never>?
     /// Area of the current page awaiting redraw: `.null` = nothing, nil = whole page.
     private var pendingDirty: CGRect? = .null
 
@@ -80,14 +94,47 @@ final class DocumentModel: ObservableObject {
         (undoStack, redoStack) = history.load()
         activeLayerID = notebook.pages.first.flatMap(Self.defaultLayer)?.id
         updateUndoState()
+        saveState = .saved(notebook.modified)
         AppDiagnostics.log.info("notebook", "Opened \"\(notebook.title)\" (\(notebook.pages.count) pages, \(undoStack.count) undo steps)")
+        extractMissingPDFText()
     }
+
+    /// PDF pages imported before page text was kept get it now, in the background, so search
+    /// and the agent can read them. Scans get an empty string so they are not retried.
+    private func extractMissingPDFText() {
+        let missing = notebook.pages.compactMap { page -> (UUID, String, Int)? in
+            guard page.backgroundText == nil, case .asset(let name, let index?) = page.paper else { return nil }
+            return (page.id, name, index)
+        }
+        guard !missing.isEmpty else { return }
+        let store = store
+        Task.detached(priority: .utility) { [weak self] in
+            var documents: [String: PDFDocument] = [:]
+            var texts: [UUID: String] = [:]
+            for (id, name, index) in missing {
+                if documents[name] == nil, let data = try? store.assetData(named: name) { documents[name] = PDFDocument(data: data) }
+                texts[id] = documents[name]?.page(at: index)?.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            }
+            await self?.setBackgroundText(texts)
+        }
+    }
+
+    private func setBackgroundText(_ texts: [UUID: String]) {
+        for i in notebook.pages.indices {
+            if let text = texts[notebook.pages[i].id] { notebook.pages[i].backgroundText = text }
+        }
+        scheduleSave()   // derived data: no undo step, no redraw
+    }
+
+    /// Pages matching `query` in typed text, handwriting and PDF text.
+    func search(_ query: String) -> [SearchIndex.Hit] { SearchIndex(notebook).hits(for: query) }
 
     func noteInkActivity() { lastInkActivity = CACurrentMediaTime() }
 
     /// Stops pending background saves and recognition (used for scratch notebooks).
     func cancelBackgroundWork() {
         saveTask?.cancel()
+        retryTask?.cancel()
         recognitionTask?.cancel()
     }
 
@@ -157,6 +204,7 @@ final class DocumentModel: ObservableObject {
         notebook.modified = Date()
         if inkChanged { pagesNeedingRecognition.insert(page.id) }
         invalidate(dirty?.cgRect)
+        if case .saved = saveState { saveState = .pending }
         scheduleSave()
     }
 
@@ -418,8 +466,14 @@ final class DocumentModel: ObservableObject {
         for (id, bitmap) in bitmaps where bitmap.isDirty {
             if let image = bitmap.image { rasters.append((id, image)); bitmap.markSaved() }
         }
-        Self.saveQueue.async {
+        saveGeneration += 1
+        let generation = saveGeneration
+        retryTask?.cancel()
+        Self.saveQueue.async { [weak self] in
+            var failure: String?
+            var failedRasters: [UUID] = []
             do { try store.save(notebook) } catch {
+                failure = error.localizedDescription
                 log.error("save", "Saving \"\(notebook.title)\" failed: \(error.localizedDescription)")
             }
             for (id, image) in rasters {
@@ -427,12 +481,35 @@ final class DocumentModel: ObservableObject {
                     guard let png = UIImage(cgImage: image).pngData() else { throw CocoaError(.fileWriteUnknown) }
                     try store.saveRaster(png, for: id)
                 } catch {
+                    failure = failure ?? error.localizedDescription
+                    failedRasters.append(id)
                     log.error("save", "Saving a paint layer failed: \(error.localizedDescription)")
                 }
             }
+            Task { @MainActor in self?.saveFinished(generation, failure: failure, failedRasters: failedRasters) }
         }
         saveHistory()
         if wait { Self.saveQueue.sync {} }
+    }
+
+    /// Updates the save state; a failed save is retried with growing delays (2 s up to 30 s).
+    private func saveFinished(_ generation: Int, failure: String?, failedRasters: [UUID]) {
+        for id in failedRasters { bitmaps[id]?.markUnsaved() }
+        if let failure {
+            saveState = .failed(failure)
+            let delay = retryDelay
+            retryDelay = min(retryDelay * 2, 30)
+            retryTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
+                guard !Task.isCancelled, let self else { return }
+                AppDiagnostics.log.info("save", "Retrying save of \"\(self.notebook.title)\"")
+                self.saveNow()
+            }
+        } else if generation == saveGeneration {
+            if case .failed = saveState { AppDiagnostics.log.info("save", "Save recovered") }
+            saveState = .saved(Date())
+            retryDelay = 2
+        }
     }
 
     /// Writes new history entries and the index on the save queue; raster snapshots are

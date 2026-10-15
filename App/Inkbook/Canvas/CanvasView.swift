@@ -75,6 +75,9 @@ final class PageView: UIView {
     private var strokesThisSession = 0
     /// Read once per stroke: switches live rendering to the previous approach for A/B timing.
     private(set) var legacyLive = false
+    /// Straight-line highlighter: the stroke is a line from touch-down to the current point.
+    private var straight = false
+    private var straightBounds: CGRect = .null
 
     init(document: DocumentModel) {
         self.document = document
@@ -129,6 +132,12 @@ final class PageView: UIView {
 
     var liveTail: [InkPoint] { live?.tail(predicted: predicted) ?? [] }
 
+    /// The straight line being drawn, as a two-point stroke.
+    var straightLine: Stroke? {
+        guard case .ink = mode, straight, let a = points.first, let b = points.last else { return nil }
+        return Stroke(brush: document.brush, points: [a, b])
+    }
+
     var legacyLiveStroke: (raw: [InkPoint], predicted: [InkPoint])? {
         guard case .ink = mode, legacyLive, !points.isEmpty else { return nil }
         return (points, predicted)
@@ -159,6 +168,7 @@ final class PageView: UIView {
         guard let touch = touches.first, accepts(touch) else { return super.touchesBegan(touches, with: event) }
         points = []; predicted = []; liveDabs = []
         live = nil; liveTailBounds = .null
+        straight = false; straightBounds = .null
         dabCarry = 0; paintedUpTo = 0; paintedBounds = .null
         strokeStart = touch.timestamp
         let p = touch.preciseLocation(in: self)
@@ -187,8 +197,9 @@ final class PageView: UIView {
             mode = .raster
         default:
             mode = .ink
-            live = LiveStroke(brush: document.brush)
-            legacyLive = InkPerf.legacyLiveInk
+            live = LiveStroke(brush: document.brush, smoothing: document.brush.stabilization)
+            straight = document.brush.drawsStraight
+            legacyLive = InkPerf.legacyLiveInk && !straight
         }
         frames.start()
         append(event?.coalescedTouches(for: touch) ?? [touch], predicted: event?.predictedTouches(for: touch) ?? [])
@@ -223,6 +234,13 @@ final class PageView: UIView {
 
     private func append(_ touches: [UITouch], predicted predictedTouches: [UITouch]) {
         InkPerf.measure("touch", InkPerf.touch) {
+            if case .ink = mode, straight {
+                points += touches.map(sample)
+                let old = straightBounds
+                straightBounds = straightLine?.bounds?.cgRect.insetBy(dx: -2, dy: -2) ?? .null
+                overlay.setNeedsDisplay(old.union(straightBounds))
+                return
+            }
             if case .ink = mode, !legacyLive {
                 appendInk(touches.map(sample), predicted: predictedTouches.map(sample))
                 return
@@ -298,9 +316,11 @@ final class PageView: UIView {
         }
         switch mode {
         case .ink:
-            guard let stroke = live, !stroke.isEmpty else { return }
+            guard let stroke = live else { return }
+            let committed = straight ? Self.straightPoints(points) : stroke.finished()
+            guard !committed.isEmpty else { return }
             InkPerf.measure("commit", InkPerf.commit) {
-                document.addStroke(Stroke(brush: stroke.brush, points: stroke.finished()))
+                document.addStroke(Stroke(brush: stroke.brush, points: committed))
             }
             strokesThisSession += 1
             if strokesThisSession % 25 == 0 { logPerf() }
@@ -316,6 +336,17 @@ final class PageView: UIView {
             document.moveSelection(by: InkbookCore.Point(offset))
         case .vectorErase, .idle:
             break
+        }
+    }
+
+    /// A straight stroke from the first to the last sample, with points every few points of length
+    /// so lasso selection and the eraser treat it like any other stroke.
+    static func straightPoints(_ points: [InkPoint]) -> [InkPoint] {
+        guard let a = points.first, let b = points.last else { return [] }
+        let n = max(1, Int(a.location.distance(to: b.location) / 6))
+        return (0...n).map { i in
+            let f = Double(i) / Double(n)
+            return InkPoint(a.location + (b.location - a.location) * f, pressure: a.pressure, time: b.time * f)
         }
     }
 
@@ -362,7 +393,9 @@ final class OverlayView: UIView {
         guard let ctx = UIGraphicsGetCurrentContext(), let host else { return }
         let document = host.documentModel
 
-        if let legacy = host.legacyLiveStroke {
+        if let line = host.straightLine {
+            PageRenderer.drawStroke(line, in: ctx)
+        } else if let legacy = host.legacyLiveStroke {
             InkPerf.measure("live draw", InkPerf.liveDraw) {
                 LiveInkRenderer.drawLegacy(raw: legacy.raw, predicted: legacy.predicted, brush: document.brush, in: ctx)
             }

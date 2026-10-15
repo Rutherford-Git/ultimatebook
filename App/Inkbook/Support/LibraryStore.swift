@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import PDFKit
 import UIKit
 import InkbookCore
 import UniformTypeIdentifiers
@@ -25,6 +26,32 @@ final class LibraryStore: ObservableObject {
     @Published private(set) var isImporting = false
 
     let root: URL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+
+    /// A page whose text matches a library search.
+    struct PageHit: Identifiable {
+        let entry: Entry
+        let hit: SearchIndex.Hit
+        var id: String { "\(entry.url.path)#\(hit.page)" }
+    }
+
+    /// Search indexes by notebook, valid while the notebook's modified date is unchanged.
+    private var indexCache: [URL: (modified: Date, index: SearchIndex)] = [:]
+
+    /// Pages in any notebook whose handwriting, typed text or PDF text contains `query`.
+    func searchPages(_ query: String) async -> [PageHit] {
+        let targets = entries.map { ($0.url, $0.modified) }
+        let cached = indexCache
+        let loaded = await Task.detached(priority: .userInitiated) {
+            targets.map { url, modified -> (URL, Date, SearchIndex?) in
+                if let c = cached[url], c.modified == modified { return (url, modified, c.index) }
+                return (url, modified, NotebookStore(url: url).loadSearchIndex())
+            }
+        }.value
+        for (url, modified, index) in loaded { if let index { indexCache[url] = (modified, index) } }
+        return entries.flatMap { entry in
+            (indexCache[entry.url]?.index.hits(for: query, limit: 5) ?? []).map { PageHit(entry: entry, hit: $0) }
+        }
+    }
 
     init() { reload() }
 
@@ -103,11 +130,13 @@ final class LibraryStore: ObservableObject {
             if doc.isEncrypted, !doc.unlockWithPassword("") {
                 errorMessage = "The PDF is password-protected."; return
             }
+            let textDoc = PDFDocument(data: data)   // page text for search and the agent
             let pages = (0..<doc.numberOfPages).map { i -> PDFImport.PageInfo in
                 guard let page = doc.page(at: i + 1) else { return PDFImport.PageInfo(size: Size(0, 0)) }
                 let box = page.getBoxRect(.cropBox)
                 let rotated = page.rotationAngle % 180 != 0
-                return PDFImport.PageInfo(size: rotated ? Size(box.height, box.width) : Size(box.width, box.height))
+                return PDFImport.PageInfo(size: rotated ? Size(box.height, box.width) : Size(box.width, box.height),
+                                          text: textDoc?.page(at: i)?.string ?? "")
             }
             let asset = "document.pdf"
             var notebook = try PDFImport.notebook(title: picked.deletingPathExtension().lastPathComponent, asset: asset, pages: pages)

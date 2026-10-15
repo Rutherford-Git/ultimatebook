@@ -22,6 +22,8 @@ struct NotebookView: View {
     @State private var renaming = false
     @State private var showQuickNote = false
     @State private var showDiagnostics = false
+    @State private var showFind = false
+    @State private var showSavedNotice = false
     @AppStorage("diag.hud") private var hud = false
     @State private var newTitle = ""
 
@@ -33,8 +35,16 @@ struct NotebookView: View {
             .background(Color(Theme.backdrop).ignoresSafeArea())
             .safeAreaInset(edge: .top, spacing: 0) { topBar }
             .overlay(alignment: .trailing) { presetRail }
-            .overlay(alignment: .topLeading) {
-                if hud { InkHUD(elementCount: document.page.layers.reduce(0) { $0 + $1.elements.count }).padding(12) }
+            .overlay(alignment: .bottomLeading) {
+                if hud { InkHUD(elementCount: document.page.layers.reduce(0) { $0 + $1.elements.count }).padding(16) }
+            }
+            .overlay(alignment: .top) { saveNotice }
+            .onChange(of: document.saveState) { old, new in
+                // After a failure clears, confirm once that the work is safe.
+                if case .failed = old, case .saved = new {
+                    showSavedNotice = true
+                    Task { try? await Task.sleep(nanoseconds: 2_000_000_000); showSavedNotice = false }
+                }
             }
             .overlay(alignment: .bottom) {
                 VStack(spacing: 10) {
@@ -51,6 +61,7 @@ struct NotebookView: View {
             .sheet(isPresented: $showAgent) { AgentPanel(document: document, chat: chat).presentationDetents([.medium, .large]) }
             .sheet(isPresented: $showAgentSettings) { AgentSettingsView() }
             .sheet(item: $exported) { ShareSheet(items: [$0.url]) }
+            .sheet(isPresented: $showFind) { FindSheet(document: document) }
             .sheet(isPresented: $showQuickNote) {
                 QuickNoteSheet(context: "\(document.notebook.title), page \(document.pageIndex + 1)")
             }
@@ -71,7 +82,7 @@ struct NotebookView: View {
             } message: { Text(exportError ?? "") }
             // Approvals show here only while no other sheet is up; the agent panel shows its own.
             .approvalSheet(for: document, enabled: !showAgent && !showAgentSettings && !showLayers && !showPages
-                           && !showQuickNote && !showDiagnostics)
+                           && !showQuickNote && !showDiagnostics && !showFind)
     }
 
     // MARK: Top bar
@@ -81,6 +92,7 @@ struct NotebookView: View {
             HStack(spacing: 2) {
                 BarButton("chevron.left", label: "Library", action: close)
                 titleMenu
+                BarButton("magnifyingglass", label: "Find in notebook") { showFind = true }
                 Spacer()
                 BarButton("arrow.uturn.backward", label: "Undo") { document.undo() }.disabled(!document.canUndo)
                 BarButton("arrow.uturn.forward", label: "Redo") { document.redo() }.disabled(!document.canRedo)
@@ -99,6 +111,7 @@ struct NotebookView: View {
 
     private var titleMenu: some View {
         Menu {
+            Section { Label(saveStatusText, systemImage: saveStatusSymbol) }
             Button { newTitle = document.notebook.title; renaming = true } label: { Label("Rename", systemImage: "pencil") }
             Button { showPages = true } label: { Label("Pages", systemImage: "square.grid.2x2") }
             Button {
@@ -118,6 +131,44 @@ struct NotebookView: View {
             .foregroundStyle(.primary)
             .frame(maxWidth: 220, alignment: .leading)
         }
+    }
+
+    private var saveStatusText: String {
+        switch document.saveState {
+        case .saved(let date):
+            date.timeIntervalSinceNow > -5 ? "Saved just now" : "Saved \(date.formatted(.relative(presentation: .named)))"
+        case .pending: "Saving…"
+        case .failed: "Couldn't save · retrying"
+        }
+    }
+
+    private var saveStatusSymbol: String {
+        switch document.saveState {
+        case .saved: "checkmark.circle"
+        case .pending: "arrow.triangle.2.circlepath"
+        case .failed: "exclamationmark.triangle"
+        }
+    }
+
+    /// Says plainly when a save fails and is being retried, then confirms once it worked.
+    @ViewBuilder private var saveNotice: some View {
+        Group {
+            if case .failed(let reason) = document.saveState {
+                Label("Couldn't save your edits. Trying again…", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .help(reason)
+            } else if showSavedNotice {
+                Label("Saved", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+            }
+        }
+        .font(.footnote.weight(.semibold))
+        .padding(.horizontal, 14).padding(.vertical, 8)
+        .background(.regularMaterial, in: Capsule())
+        .padding(.top, 62)
+        .transition(.move(edge: .top).combined(with: .opacity))
+        .animation(.snappy, value: showSavedNotice)
+        .opacity({ if case .failed = document.saveState { return 1 }; return showSavedNotice ? 1 : 0 }())
+        .allowsHitTesting(false)
     }
 
     private var toolCapsule: some View {
@@ -151,6 +202,7 @@ struct NotebookView: View {
         .buttonStyle(.plain)
         .accessibilityLabel(label)
         .accessibilityHint(active ? "Shows options" : "")
+        .help(active ? "\(label) options" : label)
         .popover(isPresented: Binding(get: { optionsFor == tool || (optionsFor?.isRaster == true && tool.isRaster) },
                                       set: { if !$0 { optionsFor = nil } })) {
             ToolOptions(document: document, presets: presets, tool: document.tool) { choose($0) }
@@ -185,6 +237,7 @@ struct NotebookView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Preset \(i + 1)")
+                    .help(selected ? "Preset \(i + 1) options" : "Preset \(i + 1)")
                 }
             }
             .padding(8)
@@ -206,6 +259,7 @@ struct NotebookView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Pages")
+            .help("Pages")
             BarButton("chevron.right", label: "Next page") { document.pageIndex += 1 }
                 .disabled(document.pageIndex >= document.notebook.pages.count - 1)
             Divider().frame(height: 18).padding(.horizontal, 2)
@@ -246,6 +300,7 @@ struct BarButton: View {
         }
         .buttonStyle(.borderless)
         .accessibilityLabel(label)
+        .help(label)
     }
 }
 
@@ -296,6 +351,7 @@ struct ToolOptions: View {
             default:
                 colorRow
                 sizeRow(range: tool == .highlighter ? 6...40 : tool == .airbrush ? 10...160 : 0.5...30)
+                if tool == .pen || tool == .highlighter { tuning }
                 preview
             }
         }
@@ -342,18 +398,77 @@ struct ToolOptions: View {
         }
     }
 
+    /// Feel of the pen: stabilization, pressure response, straight lines for the highlighter.
+    @ViewBuilder private var tuning: some View {
+        if let b = brush {
+            labeledSlider("Stabilization", value: b.stabilization, range: 0...0.9,
+                          help: "Smooths shaky lines. Higher feels steadier but follows the tip less tightly.") { v in
+                update { $0.smoothing = v }
+            }
+            if tool == .pen {
+                labeledSlider("Pressure", value: 1 - b.minSizeRatio, range: 0...0.9,
+                              help: "How much harder pressing makes the line thicker. 0 gives an even line.") { v in
+                    update { $0.minSizeRatio = 1 - v }
+                }
+            }
+            if tool == .highlighter {
+                Toggle("Straight lines", isOn: Binding(get: { b.drawsStraight }, set: { on in update { $0.straight = on } }))
+                    .help("Draws a straight line from where the pencil lands to where it lifts.")
+            }
+        }
+    }
+
+    private func labeledSlider(_ title: String, value: Double, range: ClosedRange<Double>, help: String,
+                               set: @escaping (Double) -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(title).font(.subheadline)
+                Spacer()
+                Text("\(Int((value - range.lowerBound) / (range.upperBound - range.lowerBound) * 100))%")
+                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            }
+            Slider(value: Binding(get: { value }, set: set), in: range)
+        }
+        .help(help)
+    }
+
+    /// Live preview: a shaky, pressure-varying sample stroke run through the real smoothing and
+    /// renderer, so every slider change shows exactly how ink will look.
     private var preview: some View {
         Canvas { ctx, size in
             guard let b = brush else { return }
-            var path = Path()
-            path.move(to: CGPoint(x: 12, y: size.height * 0.65))
-            path.addCurve(to: CGPoint(x: size.width - 12, y: size.height * 0.35),
-                          control1: CGPoint(x: size.width * 0.35, y: -size.height * 0.1),
-                          control2: CGPoint(x: size.width * 0.6, y: size.height * 1.1))
-            ctx.stroke(path, with: .color(b.color.swiftUI), style: StrokeStyle(lineWidth: min(b.size, 30), lineCap: .round))
+            ctx.withCGContext { cg in
+                if b.isRaster {
+                    var carry = 0.0
+                    for dab in BrushEngine.dabs(along: Self.sample(in: size, brush: b), brush: b, carry: &carry) {
+                        RasterLayerBitmap.draw(dab, brush: b, in: cg)
+                    }
+                } else if b.drawsStraight {
+                    let pts = Self.sample(in: size, brush: b)
+                    PageRenderer.drawStroke(Stroke(brush: b, points: [pts[0], pts[pts.count - 1]]), in: cg)
+                } else {
+                    var live = LiveStroke(brush: b, smoothing: b.stabilization)
+                    for p in Self.sample(in: size, brush: b) { live.add(p) }
+                    PageRenderer.drawStroke(Stroke(brush: b, points: live.finished()), in: cg)
+                }
+            }
         }
-        .frame(height: 44)
+        .frame(height: 64)
         .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityHidden(true)
+    }
+
+    /// An S-curve with hand tremor and a press-release pressure arc.
+    static func sample(in size: CGSize, brush: Brush) -> [InkPoint] {
+        let n = 90
+        let margin = 14 + min(brush.size, 30) / 2
+        return (0..<n).map { i in
+            let f = Double(i) / Double(n - 1)
+            let x = margin + f * (size.width - 2 * margin)
+            let wave = sin(f * .pi * 2) * (size.height / 2 - margin) * 0.8
+            let tremor = sin(Double(i) * 2.9) * 1.6 + cos(Double(i) * 5.3) * 1.1
+            return InkPoint(InkbookCore.Point(x, size.height / 2 + wave + tremor), pressure: 0.25 + 0.75 * sin(f * .pi))
+        }
     }
 }
 
@@ -411,5 +526,48 @@ struct PageThumbnail: View {
         .task(id: page) {
             image = document.renderer.image(of: page, rasters: document.rasterImages(for: page), maxPixels: 320)
         }
+    }
+}
+
+/// Search this notebook's typed text, handwriting and PDF text; tap a result to go to the page.
+struct FindSheet: View {
+    @ObservedObject var document: DocumentModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        NavigationStack {
+            List {
+                let hits = document.search(query)
+                if !query.trimmingCharacters(in: .whitespaces).isEmpty && hits.isEmpty {
+                    ContentUnavailableView.search(text: query)
+                }
+                ForEach(hits) { hit in
+                    Button {
+                        document.pageIndex = hit.page
+                        dismiss()
+                    } label: {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Page \(hit.page + 1)").font(.subheadline.weight(.semibold))
+                            Text(hit.snippet).font(.callout).foregroundStyle(.secondary).lineLimit(2)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always),
+                        prompt: "Handwriting, typed text and PDF text")
+            .navigationTitle("Find in notebook")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .overlay {
+                if query.isEmpty {
+                    Text("Handwriting becomes searchable a few seconds after you stop writing.")
+                        .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center).padding(40)
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
     }
 }

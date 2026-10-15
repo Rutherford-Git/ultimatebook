@@ -35,6 +35,13 @@ public struct Brush: Codable, Hashable, Sendable {
     public var softness: Double
     /// Dash pattern as on/off lengths in multiples of `size`; nil = solid.
     public var dash: [Double]?
+    /// Stroke stabilization 0 (raw) ... 0.9 (very smooth); nil = default 0.5.
+    public var smoothing: Double?
+    /// Highlighter: draw a straight line from where the pencil lands to where it lifts.
+    public var straight: Bool?
+
+    public var stabilization: Double { (smoothing ?? 0.5).clamped(0, 0.9) }
+    public var drawsStraight: Bool { straight == true }
 
     public init(kind: BrushKind, color: RGBA, size: Double,
                 minSizeRatio: Double = 0.35, spacing: Double = 0.15, softness: Double = 0, dash: [Double]? = nil) {
@@ -287,12 +294,15 @@ public struct Page: Codable, Hashable, Sendable, Identifiable {
     /// Handwriting text recognized for this page (imported or on-device), keyed by nothing:
     /// a plain reading-order transcript the agent can read.
     public var recognizedText: String?
+    /// Text of the PDF page used as background (for search and the agent).
+    public var backgroundText: String?
 
     public init(id: UUID = UUID(), size: Size = .letter, paper: Paper = .blank(.white),
-                layers: [Layer]? = nil, recognizedText: String? = nil) {
+                layers: [Layer]? = nil, recognizedText: String? = nil, backgroundText: String? = nil) {
         self.id = id; self.size = size; self.paper = paper
         self.layers = layers ?? [Layer(name: "Ink", kind: .vector)]
         self.recognizedText = recognizedText
+        self.backgroundText = backgroundText
     }
 
     public var agentLayerIndex: Int? { layers.firstIndex { $0.kind == .agent } }
@@ -304,13 +314,15 @@ public struct Page: Codable, Hashable, Sendable, Identifiable {
         return layers.count - 1
     }
 
-    /// All text the page carries: typed text boxes (in layer order) then recognized handwriting.
+    /// All text the page carries: typed text boxes (in layer order), recognized handwriting,
+    /// then the background PDF's text.
     public var allText: String {
         var parts: [String] = []
         for layer in layers where layer.isVisible {
             for case .text(let t) in layer.elements { parts.append(t.text) }
         }
         if let r = recognizedText, !r.isEmpty { parts.append(r) }
+        if let b = backgroundText, !b.isEmpty { parts.append(b) }
         return parts.joined(separator: "\n")
     }
 }

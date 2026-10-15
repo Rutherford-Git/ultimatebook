@@ -7,7 +7,9 @@ public enum PDFImport {
     public struct PageInfo: Equatable, Sendable {
         /// Displayed size in points, after applying the page's rotation.
         public var size: Size
-        public init(size: Size) { self.size = size }
+        /// Extracted page text, if the PDF has any (scans don't).
+        public var text: String?
+        public init(size: Size, text: String? = nil) { self.size = size; self.text = text }
     }
 
     public enum Failure: Error, Equatable, CustomStringConvertible {
@@ -29,7 +31,8 @@ public enum PDFImport {
             guard info.size.width.isFinite, info.size.height.isFinite, info.size.width > 0, info.size.height > 0 else {
                 throw Failure.invalidPageSize(index: i)
             }
-            return Page(size: info.size, paper: .asset(asset, pdfPage: i))
+            let text = info.text?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return Page(size: info.size, paper: .asset(asset, pdfPage: i), backgroundText: text?.isEmpty == false ? text : nil)
         }
         return Notebook(title: title, pages: built)
     }

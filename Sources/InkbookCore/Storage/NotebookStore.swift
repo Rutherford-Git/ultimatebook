@@ -74,6 +74,21 @@ public struct NotebookStore: Sendable {
         let data = try Self.encoder.encode(Manifest(schemaVersion: Notebook.schemaVersion, notebook: notebook))
         try Self.atomicWrite(data, to: manifestURL)
         try Self.atomicWrite(try Self.encoder.encode(notebook.info), to: infoURL)
+        try Self.atomicWrite(try Self.encoder.encode(SearchIndex(notebook)), to: searchURL)
+    }
+
+    private var searchURL: URL { url.appendingPathComponent("search.json") }
+
+    /// Page texts for library search, without loading the notebook. Built from the manifest
+    /// for bundles saved before the index existed.
+    public func loadSearchIndex() -> SearchIndex? {
+        if let data = try? Data(contentsOf: searchURL), let index = try? Self.decoder.decode(SearchIndex.self, from: data) {
+            return index
+        }
+        guard let notebook = try? load() else { return nil }
+        let index = SearchIndex(notebook)
+        if let data = try? Self.encoder.encode(index) { try? Self.atomicWrite(data, to: searchURL) }
+        return index
     }
 
     private var infoURL: URL { url.appendingPathComponent("info.json") }
