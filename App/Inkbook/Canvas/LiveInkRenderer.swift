@@ -74,6 +74,24 @@ enum LiveInkRenderer {
         ctx.fillEllipse(in: CGRect(x: pa.x - ra, y: pa.y - ra, width: ra * 2, height: ra * 2))
     }
 
+    /// The live straight highlighter, drawn with normal blending: the multiply layer above does the
+    /// blending, so the stroke must not multiply a second time.
+    static func drawStraightHighlight(_ line: Stroke, in ctx: CGContext) {
+        guard let a = line.points.first?.location, let b = line.points.last?.location else { return }
+        let c = line.brush.color
+        ctx.saveGState()
+        defer { ctx.restoreGState() }
+        ctx.setAlpha(c.a)
+        ctx.beginTransparencyLayer(auxiliaryInfo: nil)
+        defer { ctx.endTransparencyLayer() }
+        ctx.setStrokeColor(CGColor(srgbRed: c.r, green: c.g, blue: c.b, alpha: 1))
+        ctx.setLineWidth(line.brush.size)
+        ctx.setLineCap(.butt)
+        ctx.move(to: a.cg)
+        ctx.addLine(to: b.cg)
+        ctx.strokePath()
+    }
+
     /// Previous approach, kept for A/B timing: rebuilds and draws the whole stroke every frame.
     static func drawLegacy(raw: [InkPoint], predicted: [InkPoint], brush: Brush, in ctx: CGContext) {
         guard !raw.isEmpty else { return }

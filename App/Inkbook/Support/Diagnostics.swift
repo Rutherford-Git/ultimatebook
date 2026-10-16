@@ -107,7 +107,7 @@ private final class MetricsSubscriber: NSObject, MXMetricManagerSubscriber {
 enum InkPerf {
     static let signposter = OSSignposter(subsystem: "app.inkbook", category: "ink")
     static let touch = "touch handling", liveDraw = "live ink draw", pageDraw = "page redraw"
-    static let commit = "pen-up commit", frame = "frame interval"
+    static let commit = "pen-up commit", frame = "frame interval", fullRedraw = "full page redraw"
 
     /// The HUD and A/B switch read these.
     static var hudEnabled: Bool { UserDefaults.standard.bool(forKey: "diag.hud") }

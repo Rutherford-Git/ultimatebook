@@ -50,6 +50,11 @@ final class DocumentModel: ObservableObject {
     @Published private(set) var canRedo = false
     /// Lasso selection on the active layer of the current page.
     @Published private(set) var selection: Set<UUID> = []
+    /// Why part of a lasso was not selected (paint, hidden or locked layers), shown briefly.
+    @Published private(set) var lassoNotice: String?
+    private var lassoNoticeTask: Task<Void, Never>?
+    /// What caused the last full-page redraw, for the diagnostics log.
+    private(set) var lastFullRedrawReason = "unknown"
     /// Bumped on every content change; the canvas then redraws `takeDirtyRect()`.
     @Published private(set) var revision = 0
 
@@ -146,10 +151,25 @@ final class DocumentModel: ObservableObject {
     // MARK: Change tracking
 
     /// Marks part of the current page as needing redraw (nil = whole page).
-    func invalidate(_ rect: CGRect?) {
-        if let rect, let current = pendingDirty { pendingDirty = current.union(rect) } else { pendingDirty = nil }
+    func invalidate(_ rect: CGRect?, reason: String = "edit") {
+        if let rect, let current = pendingDirty { pendingDirty = current.union(rect) } else {
+            pendingDirty = nil
+            lastFullRedrawReason = reason
+        }
         revision &+= 1
     }
+
+    /// Redraws only what a change touched. Whole-page changes are logged with their cause.
+    func invalidate(_ change: PageChange, reason: String) {
+        switch change {
+        case .none: revision &+= 1
+        case .area(let r): invalidate(r.cgRect)
+        case .wholePage: invalidate(nil, reason: reason)
+        }
+    }
+
+    /// Records a full-page redraw requested outside the model (zoom, for example).
+    func noteFullRedraw(_ reason: String) { lastFullRedrawReason = reason }
 
     /// The area to redraw since the last call: `.null` = nothing, nil = whole page.
     func takeDirtyRect() -> CGRect? {
@@ -235,14 +255,16 @@ final class DocumentModel: ObservableObject {
 
     func undo() {
         guard let entry = undoStack.popLast() else { return }
+        let before = notebook.pages, oldIndex = pageIndex
         if let inverse = applyHistory(entry) { redoStack.append(inverse) }
-        historyChanged()
+        historyChanged(before: before, oldIndex: oldIndex, hadRaster: entry.rasterLayer != nil)
     }
 
     func redo() {
         guard let entry = redoStack.popLast() else { return }
+        let before = notebook.pages, oldIndex = pageIndex
         if let inverse = applyHistory(entry) { undoStack.append(inverse) }
-        historyChanged()
+        historyChanged(before: before, oldIndex: oldIndex, hadRaster: entry.rasterLayer != nil)
     }
 
     /// Applies a history entry and returns its inverse (nil if it no longer applies).
@@ -273,11 +295,17 @@ final class DocumentModel: ObservableObject {
         return history.rasterData(for: entry.id).flatMap { UIImage(data: $0)?.cgImage }
     }
 
-    private func historyChanged() {
+    /// Redraws only the area an undo or redo changed on the same page. Page switches, paint
+    /// layers and structural changes redraw the whole page.
+    private func historyChanged(before: [Page], oldIndex: Int, hadRaster: Bool) {
         selection = []
         ensureValidActiveLayer()
         updateUndoState()
-        invalidate(nil)
+        var change = PageChange.wholePage
+        if !hadRaster, pageIndex == oldIndex, before.indices.contains(pageIndex), notebook.pages.indices.contains(pageIndex) {
+            change = Page.change(from: before[pageIndex], to: notebook.pages[pageIndex])
+        }
+        invalidate(change, reason: "undo or redo")
         scheduleSave()
     }
 
@@ -337,8 +365,29 @@ final class DocumentModel: ObservableObject {
         selectableLayerIndices.flatMap { page.layers[$0].elements.filter { selection.contains($0.id) } }
     }
 
+    /// Selects what the lasso encloses. Anything it passed over is reported, and the same numbers go
+    /// to the diagnostics log, so a missed selection is visible instead of silent.
     func lassoSelect(_ polygon: [InkbookCore.Point]) {
-        selection = Set(selectableLayerIndices.flatMap { Lasso.select(polygon, in: page.layers[$0].elements) })
+        let box = Rect.bounding(polygon)
+        let paintUnder = page.layers.filter { $0.kind == .raster && $0.isVisible }.filter { layer in
+            guard let box, let painted = bitmap(for: layer, on: page)?.paintedBounds else { return false }
+            return painted.intersects(box)
+        }.map(\.name)
+        let report = page.lassoReport(polygon, paintUnder: paintUnder)
+        selection = Set(report.selected)
+        showLassoNotice(report.notice)
+        AppDiagnostics.log.info("lasso", report.summary)
+    }
+
+    private func showLassoNotice(_ text: String?) {
+        lassoNoticeTask?.cancel()
+        lassoNotice = text
+        guard text != nil else { return }
+        lassoNoticeTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.lassoNotice = nil
+        }
     }
 
     func clearSelection() {
@@ -398,7 +447,7 @@ final class DocumentModel: ObservableObject {
         guard notebook.pages.indices.contains(pageIndex) else { return }
         selection = []
         ensureValidActiveLayer()
-        invalidate(nil)
+        invalidate(nil, reason: "page change")
     }
 
     func addPage(after index: Int? = nil) {

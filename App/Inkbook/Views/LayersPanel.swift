@@ -10,6 +10,7 @@ struct LayersPanel: View {
             List {
                 ForEach(document.page.layers.reversed()) { layer in
                     row(layer)
+                        .listRowBackground(layer.id == document.activeLayerID ? Theme.accent.opacity(0.12) : Color.clear)
                 }
                 .onMove { from, to in
                     // List shows layers reversed; convert offsets back to model order.
@@ -30,13 +31,19 @@ struct LayersPanel: View {
     }
 
     private func row(_ layer: Layer) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let active = layer.id == document.activeLayerID
+        return VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Button { document.updateLayer(layer.id) { $0.isVisible.toggle() } } label: {
                     Image(systemName: layer.isVisible ? "eye" : "eye.slash")
                 }.buttonStyle(.borderless)
-                Image(systemName: icon(layer.kind)).foregroundStyle(.secondary)
-                Text(layer.name).fontWeight(layer.id == document.activeLayerID ? .bold : .regular)
+                Image(systemName: icon(layer.kind)).foregroundStyle(active ? Theme.accent : .secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    // Inactive layers are dimmed; the active one is marked so the target is never in doubt.
+                    Text(layer.name).fontWeight(active ? .bold : .regular)
+                        .foregroundStyle(active ? Color.primary : Color.secondary)
+                    if active { Text("New strokes go here").font(.caption2).foregroundStyle(Theme.accent) }
+                }
                 Spacer()
                 Button { document.updateLayer(layer.id) { $0.isLocked.toggle() } } label: {
                     Image(systemName: layer.isLocked ? "lock" : "lock.open")

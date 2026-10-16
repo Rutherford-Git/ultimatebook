@@ -10,6 +10,8 @@ final class RasterLayerBitmap {
     let scale: CGFloat
     private let context: CGContext
     private(set) var isDirty = false
+    /// Area that may hold paint: everything for a bitmap loaded from disk, else the stamped area.
+    private(set) var paintedBounds: InkbookCore.Rect?
 
     init?(layerID: UUID, pageSize: Size, scale: CGFloat = 2, png: Data?) {
         self.layerID = layerID; self.pageSize = pageSize; self.scale = scale
@@ -20,6 +22,7 @@ final class RasterLayerBitmap {
         context = ctx
         if let png, let image = UIImage(data: png)?.cgImage {
             ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            paintedBounds = InkbookCore.Rect(x: 0, y: 0, width: pageSize.width, height: pageSize.height)
         }
         // Page space: points, origin top-left.
         ctx.translateBy(x: 0, y: CGFloat(height))
@@ -47,7 +50,12 @@ final class RasterLayerBitmap {
         cachedImage = nil
         context.saveGState()
         context.setBlendMode(brush.kind == .eraser ? .clear : .normal)
-        for dab in dabs { Self.draw(dab, brush: brush, in: context) }
+        for dab in dabs {
+            Self.draw(dab, brush: brush, in: context)
+            let r = dab.diameter / 2 + 2
+            let box = InkbookCore.Rect(x: dab.center.x - r, y: dab.center.y - r, width: r * 2, height: r * 2)
+            paintedBounds = paintedBounds.map { InkbookCore.Rect.bounding([$0.origin, InkbookCore.Point($0.maxX, $0.maxY), box.origin, InkbookCore.Point(box.maxX, box.maxY)])! } ?? box
+        }
         context.restoreGState()
     }
 

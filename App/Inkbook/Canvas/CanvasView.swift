@@ -58,6 +58,9 @@ final class PageView: UIView {
     private let document: DocumentModel
     private let content: PageContentView
     private let overlay: OverlayView
+    /// Live highlighter, drawn in a multiply-blended layer so it shades the ink under it exactly as
+    /// the committed highlighter does (normal blending would wash the ink out until pen-up).
+    private let highlights: OverlayView
 
     private enum Mode { case idle, ink, raster, vectorErase, lasso, drag(start: CGPoint) }
     private var mode: Mode = .idle
@@ -67,6 +70,11 @@ final class PageView: UIView {
     private var liveTailBounds: CGRect = .null
     private var liveDabs: [BrushEngine.Dab] = []
     private var strokeStart: TimeInterval = 0
+    private var strokeIsHighlight = false
+    /// Predicted touches are not drawn as ink: they are discarded at pen-up, so drawing them made
+    /// the stroke look longer while writing and shorter when the pencil lifted. Set to true to
+    /// trade that visual jump for roughly one sample less latency.
+    private let drawsPredictedInk = false
     private var dabCarry = 0.0
     private var paintedUpTo = 0
     private var paintedBounds: CGRect = .null
@@ -83,14 +91,20 @@ final class PageView: UIView {
         self.document = document
         content = PageContentView(document: document)
         overlay = OverlayView()
+        highlights = OverlayView(highlightsOnly: true)
         super.init(frame: .zero)
         isMultipleTouchEnabled = false
         layer.shadowOpacity = 0.15
         layer.shadowRadius = 6
-        for v in [content, overlay] as [UIView] {
+        highlights.layer.compositingFilter = "multiplyBlendMode"
+        for v in [content, highlights, overlay] as [UIView] {
             v.autoresizingMask = [.flexibleWidth, .flexibleHeight]
             addSubview(v)
         }
+        highlights.isUserInteractionEnabled = false
+        highlights.isOpaque = false
+        highlights.backgroundColor = .clear
+        highlights.host = self
         overlay.isUserInteractionEnabled = false
         overlay.isOpaque = false
         overlay.backgroundColor = .clear
@@ -102,6 +116,7 @@ final class PageView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         content.frame = bounds
+        highlights.frame = bounds
         overlay.frame = bounds
     }
 
@@ -110,7 +125,8 @@ final class PageView: UIView {
         let screen = window?.screen.scale ?? UIScreen.main.scale
         let area = max(bounds.width * bounds.height, 1)
         let scale = min(screen * zoom, (16_000_000 / area).squareRoot(), screen * 4)
-        for v in [content, overlay] as [UIView] {
+        document.noteFullRedraw("zoom")
+        for v in [content, highlights, overlay] as [UIView] {
             v.contentScaleFactor = max(1, scale)
             v.setNeedsDisplay()
         }
@@ -125,12 +141,26 @@ final class PageView: UIView {
         } else {
             content.setNeedsDisplay()
         }
-        overlay.setNeedsDisplay()   // selection box may have moved
+        setLiveNeedsDisplay()   // selection box may have moved
     }
 
     // MARK: Overlay state
 
-    var liveTail: [InkPoint] { live?.tail(predicted: predicted) ?? [] }
+    var liveTail: [InkPoint] { live?.tail(predicted: drawsPredictedInk ? predicted : []) ?? [] }
+
+    /// True while a highlighter stroke is in progress (drawn by the multiply-blended layer).
+    var isHighlightStroke: Bool { strokeIsHighlight }
+
+    /// Refreshes the live ink layer and the live highlighter layer over the same area.
+    private func setLiveNeedsDisplay(_ rect: CGRect? = nil) {
+        if let rect {
+            overlay.setNeedsDisplay(rect)
+            highlights.setNeedsDisplay(rect)
+        } else {
+            overlay.setNeedsDisplay()
+            highlights.setNeedsDisplay()
+        }
+    }
 
     /// The straight line being drawn, as a two-point stroke.
     var straightLine: Stroke? {
@@ -169,6 +199,7 @@ final class PageView: UIView {
         points = []; predicted = []; liveDabs = []
         live = nil; liveTailBounds = .null
         straight = false; straightBounds = .null
+        strokeIsHighlight = false
         dabCarry = 0; paintedUpTo = 0; paintedBounds = .null
         strokeStart = touch.timestamp
         let p = touch.preciseLocation(in: self)
@@ -197,6 +228,7 @@ final class PageView: UIView {
             mode = .raster
         default:
             mode = .ink
+            strokeIsHighlight = document.brush.kind == .highlighter
             live = LiveStroke(brush: document.brush, smoothing: document.brush.stabilization)
             straight = document.brush.drawsStraight
             legacyLive = InkPerf.legacyLiveInk && !straight
@@ -222,7 +254,7 @@ final class PageView: UIView {
         mode = .idle; points = []; predicted = []; live = nil; liveDabs = []
         frames.stop()
         content.setNeedsDisplay()
-        overlay.setNeedsDisplay()
+        setLiveNeedsDisplay()
     }
 
     private func sample(_ t: UITouch) -> InkPoint {
@@ -238,7 +270,7 @@ final class PageView: UIView {
                 points += touches.map(sample)
                 let old = straightBounds
                 straightBounds = straightLine?.bounds?.cgRect.insetBy(dx: -2, dy: -2) ?? .null
-                overlay.setNeedsDisplay(old.union(straightBounds))
+                setLiveNeedsDisplay(old.union(straightBounds))
                 return
             }
             if case .ink = mode, !legacyLive {
@@ -259,7 +291,7 @@ final class PageView: UIView {
             default:
                 break
             }
-            overlay.setNeedsDisplay(before.union(dirtyArea()))
+            setLiveNeedsDisplay(before.union(dirtyArea()))
         }
     }
 
@@ -276,7 +308,7 @@ final class PageView: UIView {
         live = stroke
         liveTailBounds = stroke.bounds(of: stroke.tail(predicted: newPredicted))?.cgRect ?? .null
         dirty = dirty.union(liveTailBounds)
-        if !dirty.isNull { overlay.setNeedsDisplay(dirty.insetBy(dx: -1, dy: -1)) }
+        if !dirty.isNull { setLiveNeedsDisplay(dirty.insetBy(dx: -1, dy: -1)) }
     }
 
     /// Overlay area touched by the newest samples (and the previous prediction).
@@ -312,7 +344,7 @@ final class PageView: UIView {
         frames.stop()
         defer {
             mode = .idle; points = []; predicted = []; live = nil; liveDabs = []
-            overlay.setNeedsDisplay()
+            setLiveNeedsDisplay()
         }
         switch mode {
         case .ink:
@@ -361,6 +393,7 @@ final class PageView: UIView {
 }
 
 /// Committed page content. UIKit keeps the rendered bitmap; only invalidated rects redraw.
+/// Full-page redraws are timed and logged with their cause when they are slow.
 final class PageContentView: UIView {
     private let document: DocumentModel
     var skipElements: Set<UUID> = []
@@ -378,9 +411,18 @@ final class PageContentView: UIView {
     override func draw(_ rect: CGRect) {
         guard let ctx = UIGraphicsGetCurrentContext() else { return }
         let page = document.page
+        let full = rect.width >= bounds.width - 1 && rect.height >= bounds.height - 1
+        let start = CACurrentMediaTime()
         InkPerf.measure("page draw", InkPerf.pageDraw) {
             document.renderer.draw(page, in: ctx, rasters: document.rasterImages(for: page),
                                    skipElements: skipElements, visible: rect)
+        }
+        guard full else { return }
+        let ms = (CACurrentMediaTime() - start) * 1000
+        PerfRecorder.shared.record(InkPerf.fullRedraw, ms: ms)
+        if ms > 16 {
+            AppDiagnostics.log.warning("redraw", "Full page redraw took \(String(format: "%.1f", ms)) ms "
+                + "(cause: \(document.lastFullRedrawReason), \(page.layers.count) layers)")
         }
     }
 }
@@ -388,12 +430,32 @@ final class PageContentView: UIView {
 /// In-progress feedback: live ink, live paint, lasso path, selection box and dragged selection.
 final class OverlayView: UIView {
     weak var host: PageView?
+    /// True for the layer that draws only the live highlighter (multiply-blended).
+    private let drawsHighlightsOnly: Bool
+
+    init(highlightsOnly: Bool = false) {
+        drawsHighlightsOnly = highlightsOnly
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
 
     override func draw(_ rect: CGRect) {
         guard let ctx = UIGraphicsGetCurrentContext(), let host else { return }
         let document = host.documentModel
 
-        if let line = host.straightLine {
+        if drawsHighlightsOnly {
+            // Only the live highlighter; the layer above it is multiply-blended by Core Animation.
+            if host.isHighlightStroke, let line = host.straightLine {
+                LiveInkRenderer.drawStraightHighlight(line, in: ctx)
+            } else if host.isHighlightStroke, let live = host.live {
+                LiveInkRenderer.draw(live, tail: host.liveTail, in: ctx, rect: rect)
+            }
+            return
+        }
+        if host.isHighlightStroke {
+            // Highlighter is drawn by the multiply layer.
+        } else if let line = host.straightLine {
             PageRenderer.drawStroke(line, in: ctx)
         } else if let legacy = host.legacyLiveStroke {
             InkPerf.measure("live draw", InkPerf.liveDraw) {

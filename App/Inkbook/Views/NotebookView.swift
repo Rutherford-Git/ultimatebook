@@ -48,7 +48,9 @@ struct NotebookView: View {
             }
             .overlay(alignment: .bottom) {
                 VStack(spacing: 10) {
+                    if let notice = document.lassoNotice { lassoNotice(notice).transition(.opacity) }
                     if !document.selection.isEmpty { selectionBar.transition(.move(edge: .bottom).combined(with: .opacity)) }
+                    if let layer = document.activeLayer { layerChip(layer) }
                     pagePill
                 }
                 .padding(.bottom, 18)
@@ -248,6 +250,44 @@ struct NotebookView: View {
     }
 
     // MARK: Bottom
+
+    /// Names the layer new strokes go to. Tap to change layers.
+    private func layerChip(_ layer: Layer) -> some View {
+        Button { showLayers = true } label: {
+            HStack(spacing: 6) {
+                Image(systemName: layerSymbol(layer.kind)).foregroundStyle(Theme.accent)
+                Text(layer.name).font(.footnote.weight(.semibold))
+                if layer.isLocked { Image(systemName: "lock.fill").font(.caption2).foregroundStyle(.secondary) }
+                if !layer.isVisible { Image(systemName: "eye.slash").font(.caption2).foregroundStyle(.secondary) }
+                Image(systemName: "chevron.up").font(.caption2.weight(.bold)).foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay(Capsule().stroke(Theme.accent.opacity(0.35), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Drawing on \(layer.name). Change layer")
+        .help("New strokes go to \(layer.name). Open layers")
+    }
+
+    private func layerSymbol(_ kind: LayerKind) -> String {
+        switch kind {
+        case .vector: "scribble"
+        case .raster: "paintpalette"
+        case .agent: "sparkles"
+        }
+    }
+
+    /// Why part of a lasso was not selected (paint, hidden or locked layers).
+    private func lassoNotice(_ text: String) -> some View {
+        Text(text)
+            .font(.footnote)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 14).padding(.vertical, 8)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .frame(maxWidth: 420)
+            .allowsHitTesting(false)
+    }
 
     private var pagePill: some View {
         HStack(spacing: 2) {

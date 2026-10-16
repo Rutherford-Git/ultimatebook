@@ -68,12 +68,21 @@ enum SelfTest {
             let ink = Stroke(brush: doc.brush, points: wave(x: 210, y: y, width: 200, samples: 60))
             doc.addStroke(ink)
             doc.select(.lasso)
-            // Loop around both, overlapping its own start (the case even-odd filling got wrong).
-            let loop = [InkbookCore.Point(170, y - 50), InkbookCore.Point(460, y - 50), InkbookCore.Point(460, y + 50), InkbookCore.Point(170, y + 50),
-                        InkbookCore.Point(170, y - 60), InkbookCore.Point(260, y - 60)]
-            doc.lassoSelect(loop)
+            doc.lassoSelect(crossingLoop(y: y))
             let ok = doc.selection.contains(mark.id) && doc.selection.contains(ink.id)
             return ok ? nil : "selected \(doc.selection.count) of 2"
+        }
+        check("lasso selects the same items after reopening") {
+            doc.select(.lasso)
+            doc.lassoSelect(crossingLoop(y: 1350))
+            let before = doc.selection
+            guard !before.isEmpty else { return "nothing selected before saving" }
+            doc.saveNow(wait: true)
+            let reopened = try DocumentModel(store: NotebookStore(url: dir))
+            defer { reopened.cancelBackgroundWork() }
+            reopened.select(.lasso)
+            reopened.lassoSelect(crossingLoop(y: 1350))
+            return reopened.selection == before ? nil : "\(reopened.selection.count) after reopening, \(before.count) before"
         }
         check("move selection") {
             guard let before = doc.selectionBounds else { return "nothing selected" }
@@ -94,6 +103,23 @@ enum SelfTest {
             doc.select(.pen)
             return NotebookStore(url: dir).rasterData(for: layer.id) == nil ? "paint layer not written" : nil
         }
+        check("lasso over paint says so instead of selecting nothing silently") {
+            doc.select(.marker)
+            guard let layer = doc.activeLayer, layer.kind == .raster,
+                  let bitmap = doc.bitmap(for: layer, on: doc.page) else { return "no paint layer" }
+            var carry = 0.0
+            bitmap.stamp(BrushEngine.dabs(along: line(from: InkbookCore.Point(120, 1410), to: InkbookCore.Point(380, 1430)),
+                                          brush: doc.brush, carry: &carry), brush: doc.brush)
+            doc.rasterStrokeEnded(dirty: nil)
+            doc.select(.lasso)
+            doc.lassoSelect([InkbookCore.Point(90, 1385), InkbookCore.Point(410, 1385), InkbookCore.Point(410, 1450), InkbookCore.Point(90, 1450)])
+            defer { doc.clearSelection() }
+            guard doc.selection.isEmpty else { return "selected \(doc.selection.count) items where only paint was" }
+            guard let notice = doc.lassoNotice, notice.contains("Paint") else {
+                return "no paint notice (got \(doc.lassoNotice ?? "none"))"
+            }
+            return nil
+        }
         check("PDF export") {
             let url = try doc.exportPDF()
             defer { try? FileManager.default.removeItem(at: url) }
@@ -110,6 +136,12 @@ enum SelfTest {
         let report = ([header] + lines + checkLines).joined(separator: "\n")
         log.log(failed.isEmpty ? .info : .error, "selftest", report)
         return report
+    }
+
+    /// Lasso around two items at height y, overlapping its own start (the case even-odd filling got wrong).
+    static func crossingLoop(y: Double) -> [InkbookCore.Point] {
+        [InkbookCore.Point(170, y - 50), InkbookCore.Point(460, y - 50), InkbookCore.Point(460, y + 50),
+         InkbookCore.Point(170, y + 50), InkbookCore.Point(170, y - 60), InkbookCore.Point(260, y - 60)]
     }
 
     // MARK: Ink benchmark
